@@ -1,5 +1,4 @@
 """Load VitalDB ART signals and save to Parquet with Polars."""
-
 import vitaldb
 import polars as pl
 import numpy as np
@@ -60,7 +59,7 @@ def load_and_save_art_signals(record_ids, output_dir="data/data/raw", num_worker
         print(f"  File: {output_file}")
 
 if __name__ == "__main__":
-    #rangge refers to the number of surgeries in VitalDB we want to access
+    #range refers to the number of surgeries in VitalDB we want to access
     load_and_save_art_signals(range(1, 100), output_dir="../../data/data/raw")
 
 
