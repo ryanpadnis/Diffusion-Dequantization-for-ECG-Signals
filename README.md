@@ -61,6 +61,19 @@ uv run python data/visualize_chunks.py
 
 See `pyproject.toml` for full dependency list.
 
+### Adding Dependencies
+
+To add a new package (with automatic conflict resolution):
+```bash
+uv add <package>          # Add regular dependency
+uv add --dev <package>    # Add dev-only dependency
+```
+
+To sync environment after modifying `pyproject.toml`:
+```bash
+uv sync
+```
+
 ## Project Structure
 
 ```
