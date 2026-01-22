@@ -205,3 +205,26 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+.venv
+*.egg-info/
+
+# VitalDB data files
+data/raw/data/
+data/processed/chunks/
+data/plots/
+data/models/
+data/results/
+data/data/raw/
+data/data/processed/chunks/
+data/data/plots/
+data/data/models/
+data/data/results/
+data/data/interim/
+data/interim/
+data/processed/
+
+#general
+*.pt
+*.parquet
+*.npy
+*.npz   
