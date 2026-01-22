@@ -5,6 +5,7 @@ import torch
 from pathlib import Path
 from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from data import settings
 
 def chunk_record(record_id, df, sequence_length=512, stride=256, torch_dtype=torch.float32):
     """Chunk a single record."""
@@ -61,9 +62,12 @@ def chunk_signals(input_file, output_dir="data/raw",
     print(f"  Saved to {output_path / 'art_chunks.pt'}")
 
 if __name__ == "__main__":
-    chunk_signals("../../data//data/raw/art_signals.parquet", 
-                  output_dir="../../data/data/raw",
-                  sequence_length=512, 
-                  stride=512,
+    # Sizing rule: time_frames = floor((L - n_fft)/hop) + 1
+    # Choose L = hop*(T-1) + n_fft to hit a target T exactly.
+    # With n_fft=30, hop=64, target T=128 ⇒ L = 64*(128-1) + 30 = 8158
+    chunk_signals(settings.ART_SIGNALS_FILE, 
+                  output_dir=settings.RAW_DIR,
+                  sequence_length=8158, 
+                  stride=8158,
                   num_workers=4, 
                   torch_dtype=torch.float32) #can specify precision here

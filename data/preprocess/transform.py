@@ -27,9 +27,9 @@ class Transform(ABC):
     
 #stft
 class STFTTransform(Transform):
-    def __init__(self, n_fft= 128, hop_length=64, torch_dtype=torch.float32, device=torch.device('cpu')):
+    def __init__(self, n_fft=30, hop_length=64, onesided=True, torch_dtype=torch.float32, device=torch.device('cpu')):
         self.type = 'stft'
-        self.params = {'n_fft': n_fft, 'hop_length': hop_length} # n is the window size, hop is the overlap size
+        self.params = {'n_fft': n_fft, 'hop_length': hop_length, 'onesided': onesided} # n is the window size, hop is the overlap size
         self.torch_dtype = torch_dtype
         self.device = device
     
@@ -38,8 +38,8 @@ class STFTTransform(Transform):
         Apply STFT to input signal. Handles batched data.
         
         Args:
-            signal: [batch_size, signal_length] or [signal_length]
-                    Example: [120000, 512] for 120k samples
+                    signal: [batch_size, signal_length] or [signal_length]
+                        Example: [batch_size, 8158] for 128 frames with n_fft=30, hop=64
         
         Returns:
             stft_mag: [batch_size, freq_bins, time_frames] or [freq_bins, time_frames]
@@ -48,12 +48,14 @@ class STFTTransform(Transform):
         signal = signal.to(dtype=self.torch_dtype, device=self.device)
         n_fft = self.params['n_fft']
         hop_length = self.params['hop_length']
+        onesided = self.params['onesided']
         
         # Compute STFT (should handle batches automatically)
         stft_complex = torch.stft(
             signal, 
             n_fft=n_fft, 
             hop_length=hop_length,
+            onesided=onesided,
             return_complex=True,
             window=torch.hann_window(n_fft, device=self.device),
             normalized=False,
