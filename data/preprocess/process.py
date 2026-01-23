@@ -36,15 +36,16 @@ def process_signals(quantizers: List[str], transforms: List[str], bits_list: Lis
                 for signal in tqdm(signals, desc=f"Processing with {quantizer_name} + {transform_name} @ {bits} bits"):
                     signal = signal.to(dtype=torch_dtype, device=device)
 
-                    # Apply transform (freq bins = n_fft/2 + 1 when onesided=True)
+                    # Apply transform (sklearn-style transform returns numpy)
                     if transform_name == 'stft':
                         transform = STFTTransform(torch_dtype=torch_dtype, device=device)
                     elif transform_name == 'haar':
                         transform = HaarWaveletTransform(torch_dtype=torch_dtype, device=device)
                     else:
                         raise ValueError(f"Unknown transform: {transform_name}")
-                    
-                    transformed_signal = transform.apply(signal)
+
+                    transformed_np = transform.transform(signal.unsqueeze(0)).squeeze(0)
+                    transformed_signal = torch.from_numpy(transformed_np).to(device=device, dtype=torch_dtype)
                     
                     if quantizer_name == 'uniform':
                         quantizer = UniformQuantizer(bits=bits, range_min=transformed_signal.min().item(), range_max=transformed_signal.max().item())
@@ -59,6 +60,8 @@ def process_signals(quantizers: List[str], transforms: List[str], bits_list: Lis
             output_file = settings.output_path(quantizer_name, transform_name, bits)
             torch.save({'signals': torch.stack(processed_signals)}, output_file)
             print(f"Saved processed signals to {output_file}")
+            print(f"  Tensor shape: {torch.stack(processed_signals).shape}")
+            print("Datatype:", torch.stack(processed_signals).dtype)
 
 
 if __name__ == "__main__":
