@@ -21,4 +21,4 @@ dependencies = [
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["data*"]
+include = ["data*", "diffusion*"]
