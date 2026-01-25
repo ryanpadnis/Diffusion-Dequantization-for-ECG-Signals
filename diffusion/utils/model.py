@@ -16,6 +16,9 @@ import torch.nn.functional as F
 from diffusers import UNet2DConditionModel, DDPMScheduler, DDIMScheduler
 from pathlib import Path
 from typing import Dict, Any, Optional, Literal
+from tqdm import tqdm
+
+from diffusion.utils.torch_utils import resolve_torch_dtype
 
 
 class ConditionalDiffuser(nn.Module):
@@ -171,62 +174,7 @@ class ConditionalDiffuser(nn.Module):
         loss = F.mse_loss(noise_pred, noise)
         
         return loss
-    
-    @torch.no_grad()
-    def sample(
-        self,
-        condition: torch.Tensor,
-        num_inference_steps: int = 50,
-        generator: Optional[torch.Generator] = None,
-        use_ddim: bool = True
-    ) -> torch.Tensor:
-        """Generate samples from condition.
-        
-        Args:
-            condition: 4-bit condition, [B, 1, 16, 128]
-            num_inference_steps: Denoising steps
-            generator: For reproducibility
-            use_ddim: Use DDIM for faster sampling
-        
-        Returns:
-            Generated samples, [B, 1, 16, 128]
-        """
-        device = condition.device
-        batch_size = condition.shape[0]
-        
-        # Choose scheduler
-        if use_ddim and self.scheduler_type == 'ddpm':
-            # Create DDIM from DDPM config for faster sampling
-            scheduler = DDIMScheduler.from_config(self.noise_scheduler.config)
-        else:
-            scheduler = self.noise_scheduler
-        
-        scheduler.set_timesteps(num_inference_steps, device=device)
-        
-        # Start from noise
-        image = torch.randn(
-            (batch_size, 1, 16, 128),
-            device=device,
-            generator=generator
-        )
-        
-        # Encode condition once
-        cond_embed = self.encode_condition(condition)
-        
-        # Iterative denoising
-        for t in scheduler.timesteps:
-            # Predict noise
-            noise_pred = self.unet(
-                image,
-                t,
-                encoder_hidden_states=cond_embed,
-                return_dict=False
-            )[0]
-            
-            # Remove noise
-            image = scheduler.step(noise_pred, t, image).prev_sample
-        
-        return image
+
     
     def save_checkpoint(self, path: Path, **kwargs):
         """Save checkpoint (Ray Train compatible)."""
@@ -256,19 +204,47 @@ class ConditionalDiffuser(nn.Module):
 # Factory functions for Ray Train
 def create_diffuser(config: Dict[str, Any]) -> ConditionalDiffuser:
     """Factory for Ray Train compatibility."""
-    return ConditionalDiffuser(
+    scheduler_type = config.get('scheduler_type', config.get('sampler_type', 'ddpm'))
+    model = ConditionalDiffuser(
         config,
         unet_type=config.get('unet_type', 'conditional'),
-        scheduler_type=config.get('sampler_type', 'ddpm')
+        scheduler_type=scheduler_type,
     )
+    device = torch.device(config.get('device', 'cpu'))
+    dtype = resolve_torch_dtype(config, device=device)
+    model = model.to(device=device, dtype=dtype)
+    return model
 
 
 def get_optimizer(model: ConditionalDiffuser, config: Dict[str, Any]) -> torch.optim.Optimizer:
-    """Create optimizer (extensible)."""
-    return torch.optim.AdamW(
-        model.parameters(),
-        lr=config.get('learning_rate', 1e-4)
-    )
+    """Create optimizer from config (extensible for different optimizer types)."""
+    optimizer_type = config.get('optimizer_type', 'adamw').lower()
+    lr = config.get('learning_rate', 1e-4)
+    
+    if optimizer_type == 'adamw':
+        return torch.optim.AdamW(
+            model.parameters(),
+            lr=lr,
+            betas=(config.get('adam_beta1', 0.95), config.get('adam_beta2', 0.999)),
+            weight_decay=config.get('adam_weight_decay', 1e-6),
+            eps=config.get('adam_epsilon', 1e-8),
+        )
+    elif optimizer_type == 'adam':
+        return torch.optim.Adam(
+            model.parameters(),
+            lr=lr,
+            betas=(config.get('adam_beta1', 0.95), config.get('adam_beta2', 0.999)),
+            eps=config.get('adam_epsilon', 1e-8),
+        )
+    elif optimizer_type == 'sgd':
+        return torch.optim.SGD(
+            model.parameters(),
+            lr=lr,
+            momentum=config.get('sgd_momentum', 0.9),
+            weight_decay=config.get('adam_weight_decay', 1e-6),
+        )
+    else:
+        raise ValueError(f"Unknown optimizer_type: {optimizer_type}. Use: adamw, adam, sgd")
 
 
 def get_lr_scheduler(optimizer: torch.optim.Optimizer, config: Dict[str, Any], num_training_steps: int):
@@ -280,5 +256,3 @@ def get_lr_scheduler(optimizer: torch.optim.Optimizer, config: Dict[str, Any], n
         num_warmup_steps=config.get('lr_warmup_steps', 500),
         num_training_steps=num_training_steps
     )
-    
-  
