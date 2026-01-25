@@ -1,56 +1,109 @@
 """
-Docstring for diffusion.utils.config
+Configuration for diffusion model training.
 """
 
 import os
+from pathlib import Path
 import diffusion.settings as settings
-from sklearn.pipeline import Pipeline
+import torch
+
 
 class DiffusionConfig:
+    """Configuration for diffusion training."""
+    
     version = "V1"
 
-    #immutaable project paths
+    # Immutable project paths
     diffusion_root = settings.DIFFUSION_ROOT
     project_root = settings.PROJECT_ROOT
     data_root = settings.PROJECT_ROOT / "data"
     raw_data_dir = data_root / "data" / "raw"
-
     raw_data_path = raw_data_dir / "art_chunks.pt"
     
-    #version specific
-    checkpoint_dir = diffusion_root / version / "checkpoints"
-    logs_dir = diffusion_root / version / "logs"
-    samples_dir = diffusion_root / version / "samples"
-    data_dir = diffusion_root / version / "data"
-    data_path = data_dir / "train_data.pt"
+    # Version specific (include results dir)
+    results_dir = diffusion_root / "results" / version
+    checkpoint_dir = results_dir / "checkpoints"
+    logs_dir = results_dir / "logs"
+    samples_dir = results_dir / "samples"
+    data_dir = results_dir / "data"
 
-    #Diffusion Model Parameters
-    unet_type = "UNet2DConditional"
-    diffusion_type = "Gaussian"
-    noise_schedule = "linear"
+    # Diffusion Model Parameters
+    unet_type = "conditional"
+    scheduler_type = "ddpm"
     num_noising_steps = 1000
-    sampler_type = "ddpm"
-    image_size = (16, 128)  # Example size (height, width)
-    in_channels = 1 #num features
+    image_size = (16, 128)  # (height, width)
+    in_channels = 1
     out_channels = 1
 
-    #conditioning
-    bit_size = 4
+    # Conditioning
+    bit_size = 4  # Condition bit depth
+    real_bit_size = 16  # Real data bit depth
     quantizer_type = "uniform"
     transform_type = "stft"
-    #dictionery for the  data pipeline
+
+    # Quantizer range computation (percentile clipping to avoid outliers dominating range)
+    # Example: upper=99.5 means values above the 99.5th percentile clip to range_max.
+    quantile_clip_lower = 0.0
+    quantile_clip_upper = 99.5
+
+    # Regenerate processed datasets even if they exist (recommended when changing preprocessing).
+    force_preprocess = True
+    
+    # Data pipeline config
     pipeline_config = {
         "transform": "stft",
         "n_fft": 30,
-        "hop_length": 64,
+        "hop_length": 15,
+        "win_length": 30,
         "onesided": True,
+        "center": False,
     }
-    #tuning parameters
+    
+    # Training parameters
     learning_rate = 1e-4
     batch_size = 16
     num_epochs = 100
-    save_checkpoint_every = 10
-    validate_every = 5
+    epochs = 30
+    gradient_accumulation_steps = 1
+    num_workers = 0
+    mixed_precision = None
+    max_samples = None  # Limit dataset size for faster local testing 
+    max_batches = 100  # Limit to N batches for quick testing 
+    
+    # Checkpointing and validation
+    save_every_n_epochs = 1
+    validate_every_n_epochs = 1
     validation_split = 0.1
+    
+    # Optimizer
+    optimizer_type = 'adamw'  # 'adamw', 'adam', or 'sgd'
+    adam_beta1 = 0.95
+    adam_beta2 = 0.999
+    adam_weight_decay = 1e-6
+    adam_epsilon = 1e-8
+    sgd_momentum = 0.9
+    
+    # LR Scheduler
+    lr_warmup_steps = None  # None = warmup for first epoch automatically
+    
+    # Sampling
+    num_trajectories = 3  # Number of diverse samples per condition
+    
+    # Device (cuda, mps, or cpu)
+    device = "cuda" if os.environ.get("CUDA_VISIBLE_DEVICES") else "cpu"
+
+    # Tensor dtype for model + data on device.
+    torch_dtype = "float16"
+    
+    # Random seed
     random_seed = 42
+    
+    @classmethod
+    def to_dict(cls) -> dict:
+        """Convert config to dictionary."""
+        return {
+            key: getattr(cls, key)
+            for key in dir(cls)
+            if not key.startswith('_') and not callable(getattr(cls, key))
+        }
 

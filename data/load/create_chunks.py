@@ -64,10 +64,11 @@ def chunk_signals(input_file, output_dir="data/raw",
 if __name__ == "__main__":
     # Sizing rule: time_frames = floor((L - n_fft)/hop) + 1
     # Choose L = hop*(T-1) + n_fft to hit a target T exactly.
-    # With n_fft=30, hop=64, target T=128 ⇒ L = 64*(128-1) + 30 = 8158
-    chunk_signals(settings.ART_SIGNALS_FILE, 
+    # Use COLA-friendly hop = win_length//2 with n_fft=30, win_length=30 => hop=15
+    # With n_fft=30, hop=15, target T=128 ⇒ L = 15*(128-1) + 30 = 1935
+    chunk_signals(settings.ART_SIGNALS_FILE,
                   output_dir=settings.RAW_DIR,
-                  sequence_length=8158, 
-                  stride=8158,
-                  num_workers=4, 
-                  torch_dtype=torch.float32) #can specify precision here
+                  sequence_length=1935,
+                  stride=1935,
+                  num_workers=4,
+                  torch_dtype=torch.float32) # can specify precision here

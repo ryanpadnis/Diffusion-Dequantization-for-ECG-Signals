@@ -228,3 +228,31 @@ data/processed/
 *.parquet
 *.npy
 *.npz   
+
+# Figures / images
+*.png
+*.jpg
+*.jpeg
+*.tif
+*.tiff
+*.bmp
+*.gif
+*.svg
+
+# Pickles / serialized artifacts
+*.pkl
+*.pickle
+
+# TensorBoard / training logs
+events.out.tfevents.*
+**/tensorboard/**
+
+# Diffusion run artifacts
+diffusion/results/
+diffusion/**/checkpoints/
+diffusion/**/samples/
+diffusion/**/logs/
+
+# Keep lockfiles and project metadata tracked
+!uv.lock
+!pyproject.toml
