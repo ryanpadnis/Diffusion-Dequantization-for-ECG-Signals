@@ -1,0 +1,179 @@
+# AWS / S3 setup (local + Anyscale)
+
+This folder contains optional helpers for syncing run artifacts to S3.
+
+## Your bucket
+
+- Bucket: `ee269--use2-az1--x-s3`
+- Region: `us-east-2` ("use2")
+
+## Local machine setup (Mac)
+
+**Goal:** make `boto3` able to authenticate so `--s3` uploads work.
+
+You have two common ways to provide credentials:
+
+### Option A: AWS CLI config files (recommended)
+
+1) Install AWS CLI (if you don’t already have it):
+
+- `brew install awscli`
+
+2) Configure credentials + default region:
+
+- `aws configure`
+  - AWS Access Key ID: (from your IAM user)
+  - AWS Secret Access Key: (from your IAM user)
+  - Default region name: `us-east-2`
+  - Default output format: `json`
+
+This writes to `~/.aws/credentials` and `~/.aws/config`.
+
+### Option B: Environment variables (temporary)
+
+In your terminal:
+
+- `export AWS_ACCESS_KEY_ID=...`
+- `export AWS_SECRET_ACCESS_KEY=...`
+- `export AWS_DEFAULT_REGION=us-east-2`
+
+This only lasts for that shell session.
+
+## Verify access (smoke test)
+
+Run:
+
+- `uv run python -m diffusion.aws.check_s3 --bucket ee269--use2-az1--x-s3 --region us-east-2`
+
+This will:
+- call STS `GetCallerIdentity`
+- write a tiny test object under `s3://<bucket>/ee269project/smoke-test/...`
+- delete it
+
+## Upload training artifacts
+
+Once credentials work:
+
+- `uv run python -m diffusion.train.ray_train --s3 s3://ee269--use2-az1--x-s3/ee269project --s3-region us-east-2 --keep-last 3`
+
+Notes:
+- This uploads `checkpoints/`, `samples/`, `logs/`, and the derived `data/` artifacts (saved tensors/normalizer params).
+- It does **not** upload your raw dataset (`data/data/raw`).
+- Old runs are pruned under the S3 prefix (keep-last-N).
+
+### Important: idempotent S3 data upload
+
+When `s3_data_uri` is configured (as in `ray_train` when you pass `--s3`), preprocessing artifacts are uploaded to:
+
+- `s3://ee269--use2-az1--x-s3/ee269project/data/V1/`
+
+If these objects already exist, the code skips re-uploading them (unless `force_preprocess=True`). This avoids repeatedly uploading the large `train_*.pt` tensors.
+
+### Important: faster artifact syncing
+
+Artifact syncing to S3 is incremental: repeated syncs only upload changed files. If you want to avoid any periodic syncing overhead, set:
+
+- `--s3-sync-interval 0`
+
+## Anyscale (Ray on AWS) setup
+
+If you don’t want to manage EC2 keys/AMIs/security groups yourself, Anyscale is usually the easiest way to run a GPU Ray cluster.
+
+### Python / Ray requirement
+
+Ray requires Python >= 3.10. This repo is configured to work with `uv` + Python 3.11.
+
+If you need to set it up locally:
+
+- `uv python install 3.11`
+- `uv venv --python 3.11`
+- `uv sync`
+
+### What you need in AWS
+
+You still need an IAM role Anyscale can use to create instances in your AWS account *and* your cluster nodes must be able to write to the S3 Express directory bucket.
+
+- For node access to the directory bucket, use the policy template:
+  - [diffusion/aws/iam_policy_ray_nodes.json](diffusion/aws/iam_policy_ray_nodes.json)
+  - Key permission for directory buckets: `s3express:CreateSession`
+
+### Steps (high level)
+
+1) Create an Anyscale account + workspace.
+2) In Anyscale, connect your AWS account (they provide a guided flow / CloudFormation).
+3) Ensure the node role/instance profile used by your clusters includes the S3/S3 Express permissions above.
+4) Configure the workspace compute to include a GPU *worker*.
+  - Recommended cheapest 1-GPU worker in `us-east-2`: `g4dn.xlarge` (1x T4).
+  - Keep head node CPU-only/cheap; don’t schedule work on the head.
+5) Start the workspace and run training on the GPU worker.
+
+### CLI workflow (recommended)
+
+Assuming your workspace is named `EE269` and your cloud/project are the defaults.
+
+1) Start the workspace:
+
+- `uv run anyscale workspace_v2 start --name EE269`
+
+2) Wait until it’s running:
+
+- `uv run anyscale workspace_v2 wait --name EE269 --state RUNNING`
+
+3) Run sanity checks inside the workspace (no SSH needed):
+
+- `uv run anyscale workspace_v2 run_command --name EE269 --command 'nvidia-smi'`
+- `uv run anyscale workspace_v2 run_command --name EE269 --command "python -c \"import ray; ray.init(address='auto'); print(ray.cluster_resources()); ray.shutdown()\""`
+
+You should see `'GPU': 1.0` (or more) in `ray.cluster_resources()`.
+
+4) Verify S3 access from the workspace nodes (directory-bucket permissions):
+
+- `uv run anyscale workspace_v2 run_command --name EE269 --command 'uv run python -m diffusion.aws.check_s3 --bucket ee269--use2-az1--x-s3 --region us-east-2'`
+
+5) Run training on the GPU worker:
+
+- `uv run anyscale workspace_v2 run_command --name EE269 --command 'uv run python -m diffusion.train.ray_train --ray-address auto --ray-num-gpus 1 --s3 s3://ee269--use2-az1--x-s3/ee269project --s3-region us-east-2 --keep-last 3'`
+
+### SSH workflow (alternative)
+
+If you prefer an interactive shell:
+
+- `uv run anyscale workspace_v2 ssh --name EE269`
+
+Then (inside the workspace):
+
+- `nvidia-smi`
+- `python -c "import ray; ray.init(address='auto'); print(ray.cluster_resources()); ray.shutdown()"`
+- `uv run python -m diffusion.train.ray_train --ray-address auto --ray-num-gpus 1 --s3 s3://ee269--use2-az1--x-s3/ee269project --s3-region us-east-2 --keep-last 3`
+
+### How to confirm it’s using the right workspace + GPU
+
+- If you run without `--ray-address`, you are running locally (not Anyscale).
+- If `ray.cluster_resources()` shows GPUs and `--ray-num-gpus 1` is set, the training task will run on a GPU node.
+- `ray_train` prints the exact S3 run prefix at startup (this is the definitive “right bucket/path” check).
+
+### Troubleshooting
+
+#### EC2 error: “instance type is not eligible for Free Tier”
+
+If the workspace/cluster logs show errors like:
+
+- `InvalidParameterCombination: The specified instance type is not eligible for Free Tier ... free-tier-eligible=true`
+
+then your AWS account/role is restricted to **Free Tier eligible** instance types. GPU instances like `g4dn.xlarge` are **not** Free Tier eligible, so you cannot start GPU workers (or GPU heads) until that restriction is removed.
+
+What to do:
+
+- If you control the AWS account: remove/relax the policy that constrains `ec2:RunInstances` to Free Tier eligible instance types (often an AWS Organizations SCP, permission boundary, or sandbox guardrail).
+- If you don’t control it (class/sandbox account): you’ll need a different AWS account with GPU permissions, or accept CPU-only training.
+
+To list Free Tier eligible instance types (CPU-only) in your region:
+
+- `aws ec2 describe-instance-types --region us-east-2 --filters Name=free-tier-eligible,Values=true --query 'InstanceTypes[].InstanceType' --output text`
+
+Notes:
+
+- Spot vs on-demand does not fix Free Tier restrictions.
+- A “GPU worker” requires a non-Free-Tier instance type, so GPU training implies paid usage (or credits).
+
+If you paste the exact “AWS connection” and “cluster node role” fields Anyscale shows you (or a screenshot of the cluster config page), I can tell you exactly where to attach the policy and what to pick for the cheapest GPU option.

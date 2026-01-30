@@ -8,6 +8,9 @@ import os
 from pathlib import Path
 from typing import Optional
 
+import io
+import tempfile
+
 import torch
 
 from data.preprocess.transform import get_transform, AVAILABLE_TRANSFORMS
@@ -90,30 +93,11 @@ def create_transform(transform_config: dict, device: str):
 def create_quantizer(config: dict, signals: torch.Tensor) -> UniformQuantizer:
     """Create quantizer from config and compute range from signals."""
     bits = config.get('bits', 4)
+    range_min = float(signals.min().item())
+    range_max = float(signals.max().item())
 
-    # Allow percentile clipping to avoid extreme outliers.
-    lower_pct = float(config.get('quantile_clip_lower', 0.0))
-    upper_pct = float(config.get('quantile_clip_upper', 100.0))
-
-    # Compute robust range using percentiles on the transformed signals
-    try:
-        range_min, range_max = compute_range_from_tensor(signals, lower_pct, upper_pct)
-    except Exception:
-        # Fallback to min/max
-        range_min = float(signals.min().item())
-        range_max = float(signals.max().item())
-
-    # STFT magnitudes are non-negative; anchoring at 0 often prevents crushing low-energy bins
-    if config.get('transform_type', 'stft') == 'stft':
-        range_min = 0.0 if lower_pct <= 0.0 else range_min
-
-    # Add small margin to avoid edge effects
-    margin = (range_max - range_min) * 0.01 if (range_max - range_min) != 0 else 0.0
-    range_max = range_max + margin
 
     q = UniformQuantizer(bits=bits, range_min=range_min, range_max=range_max)
-    # Attach metadata for debugging
-    q._meta = {'lower_pct': lower_pct, 'upper_pct': upper_pct}
     return q
 
 
@@ -127,12 +111,6 @@ def create_time_quantizer(config: dict, signals_time: torch.Tensor, bits: int) -
 
     lo, hi = compute_range_from_tensor(signals_time, lower_pct, upper_pct)
     peak = max(abs(lo), abs(hi))
-    # Avoid degenerate range
-    if peak <= 0:
-        peak = float(signals_time.abs().max().item())
-    if peak <= 0:
-        peak = 1.0
-
     q = UniformQuantizer(bits=bits, range_min=-peak, range_max=peak)
     q._meta = {'lower_pct': lower_pct, 'upper_pct': upper_pct, 'symmetric': True}
     return q
@@ -173,8 +151,86 @@ def train_diffuser(config: dict):
     
     print(f"[train_diffuser] Device: {device}")
 
+    # Optional: store/load preprocessed data directly in S3.
+    # This is useful on ephemeral clusters where local disk shouldn't be the source of truth.
+    s3_data_uri = str(config.get('s3_data_uri') or '').strip() or None
+
+    # Initialize to satisfy control flow when force_preprocess is set.
+    cond_data = None
+    real_data = None
+
+    def _extract_signals(loaded):
+        # Mirror load_data() behavior but for already-loaded objects.
+        if isinstance(loaded, dict):
+            signals = loaded.get('signals')
+            if signals is None:
+                signals = loaded.get('chunks')
+            if signals is None:
+                raise KeyError("Expected key 'signals' or 'chunks' in loaded data")
+            return signals
+        return loaded
+
+    def _s3_client():
+        # Lazy import to avoid requiring boto3 unless S3 features are used.
+        from diffusion.aws.s3_io import _require_boto3
+
+        boto3 = _require_boto3()
+        return boto3.client('s3')
+
+    def _s3_get_torch(s3_uri: str):
+        from diffusion.aws.s3_io import split_s3_uri
+        from botocore.exceptions import ClientError  # type: ignore
+
+        bucket, key = split_s3_uri(s3_uri)
+        if not key:
+            raise ValueError(f"S3 URI must include a key: {s3_uri}")
+
+        client = _s3_client()
+        try:
+            resp = client.get_object(Bucket=bucket, Key=key)
+        except ClientError as e:
+            code = str(e.response.get('Error', {}).get('Code', ''))
+            if code in {'NoSuchKey', '404', 'NotFound'}:
+                raise FileNotFoundError(s3_uri) from e
+            raise
+
+        body = resp['Body']
+        # torch.load requires a seekable file-like object.
+        with tempfile.SpooledTemporaryFile(max_size=64 * 1024 * 1024) as f:
+            while True:
+                chunk = body.read(8 * 1024 * 1024)
+                if not chunk:
+                    break
+                f.write(chunk)
+            f.seek(0)
+            return torch.load(f)
+
+    def _s3_put_torch(obj, s3_uri: str) -> None:
+        from diffusion.aws.s3_io import split_s3_uri
+
+        bucket, key = split_s3_uri(s3_uri)
+        if not key:
+            raise ValueError(f"S3 URI must include a key: {s3_uri}")
+
+        client = _s3_client()
+        # Avoid holding an extra full copy in RAM for large tensors by spooling to tmp.
+        with tempfile.SpooledTemporaryFile(max_size=64 * 1024 * 1024) as f:
+            torch.save(obj, f)
+            f.seek(0)
+            client.upload_fileobj(f, bucket, key)
+
+    def _s3_put_bytes(data: bytes, s3_uri: str) -> None:
+        from diffusion.aws.s3_io import split_s3_uri
+
+        bucket, key = split_s3_uri(s3_uri)
+        if not key:
+            raise ValueError(f"S3 URI must include a key: {s3_uri}")
+        client = _s3_client()
+        client.put_object(Bucket=bucket, Key=key, Body=data)
+
     # Get paths and processing parameters from config
-    data_dir = Path(config.get('data_dir'))
+    data_dir_val = config.get('data_dir')
+    data_dir = Path(data_dir_val) if data_dir_val else None
     raw_data_path = Path(config.get('raw_data_path'))
     quantizer_type = config.get('quantizer_type', 'uniform')
     transform_type = config.get('transform_type', 'stft')
@@ -186,8 +242,6 @@ def train_diffuser(config: dict):
     samples_dir = Path(config.get('samples_dir'))
     logs_dir = Path(config.get('logs_dir'))
 
-    # Keep TensorBoard runs clean by writing each run to its own log subdir.
-    # This prevents mixed/overlaid curves from multiple runs.
     from datetime import datetime
     run_id = str(config.get('run_id') or datetime.now().strftime('%Y%m%d_%H%M%S'))
     logs_dir = logs_dir / run_id
@@ -196,7 +250,10 @@ def train_diffuser(config: dict):
     os.makedirs(checkpoint_dir, exist_ok=True)
     os.makedirs(samples_dir, exist_ok=True)
     os.makedirs(logs_dir, exist_ok=True)
-    os.makedirs(data_dir, exist_ok=True)
+    if s3_data_uri is None:
+        if data_dir is None:
+            raise ValueError("config['data_dir'] must be set when not using S3 for preprocessed data")
+        os.makedirs(data_dir, exist_ok=True)
     
     # Save config for later loading by sampler
     import pickle
@@ -209,12 +266,50 @@ def train_diffuser(config: dict):
     cond_filename = construct_train_filename(quantizer_type, transform_type, cond_bits, cond=True)
     real_filename = construct_train_filename(quantizer_type, transform_type, real_bits, cond=False)
     
-    cond_data_path = data_dir / cond_filename
-    real_data_path = data_dir / real_filename
+    if s3_data_uri is not None:
+        from diffusion.aws.s3_io import normalize_s3_uri, join_s3_uri
+
+        s3_data_uri = normalize_s3_uri(s3_data_uri)
+        cond_data_s3 = join_s3_uri(s3_data_uri, cond_filename)
+        real_data_s3 = join_s3_uri(s3_data_uri, real_filename)
+        normalizer_s3 = join_s3_uri(s3_data_uri, 'normalizer_params.pkl')
+        cond_data_path = None
+        real_data_path = None
+    else:
+        assert data_dir is not None
+        cond_data_path = data_dir / cond_filename
+        real_data_path = data_dir / real_filename
   
     force_preprocess = bool(config.get('force_preprocess', False))
 
-    if (not force_preprocess) and cond_data_path.exists() and real_data_path.exists():
+    if (not force_preprocess) and s3_data_uri is not None:
+        # Try S3 first.
+        try:
+            print(f"[train_diffuser] Loading pre-processed datasets from S3:")
+            print(f"  - Condition (4-bit): {cond_data_s3}")
+            cond_loaded = _s3_get_torch(cond_data_s3)
+            print(f"  - Real data (16-bit): {real_data_s3}")
+            real_loaded = _s3_get_torch(real_data_s3)
+
+            cond_data = _extract_signals(cond_loaded).to(device)
+            real_data = _extract_signals(real_loaded).to(device)
+
+            # Channel dimension for 2-d unet
+            if cond_data.ndim == 3:
+                cond_data = cond_data.unsqueeze(1)
+            if real_data.ndim == 3:
+                real_data = real_data.unsqueeze(1)
+
+            print(f"[train_diffuser] Condition shape: {cond_data.shape}")
+            print(f"[train_diffuser] Real data shape: {real_data.shape}")
+        except FileNotFoundError:
+            print("[train_diffuser] Preprocessed data not found in S3; will preprocess from raw.")
+            cond_data = None
+            real_data = None
+
+    if cond_data is not None and real_data is not None:
+        pass
+    elif (not force_preprocess) and s3_data_uri is None and cond_data_path.exists() and real_data_path.exists():
         # Load pre-processed data directly
         print(f"[train_diffuser] Loading pre-processed datasets:")
         print(f"  - Condition (4-bit): {cond_data_path}")
@@ -267,11 +362,28 @@ def train_diffuser(config: dict):
         print(f"[train_diffuser] Condition data shape: {cond_data.shape}")
         print(f"[train_diffuser] Real data shape: {real_data.shape}")
         
-        print(f"[train_diffuser] Saving condition spectrograms to: {cond_data_path}")
-        torch.save({'signals': cond_data.to(torch.float32).cpu()}, cond_data_path)
-        print(f"[train_diffuser] Saving real spectrograms to: {real_data_path}")
-        torch.save({'signals': real_data.to(torch.float32).cpu()}, real_data_path)
-        print(f"[train_diffuser] Saved both datasets")
+        if s3_data_uri is not None:
+            from diffusion.aws.s3_io import s3_object_exists
+
+            if (not force_preprocess) and s3_object_exists(cond_data_s3):
+                print(f"[train_diffuser] Condition dataset already exists in S3; skipping upload: {cond_data_s3}")
+            else:
+                print(f"[train_diffuser] Uploading condition spectrograms to: {cond_data_s3}")
+                _s3_put_torch({'signals': cond_data.to(torch.float32).cpu()}, cond_data_s3)
+
+            if (not force_preprocess) and s3_object_exists(real_data_s3):
+                print(f"[train_diffuser] Real dataset already exists in S3; skipping upload: {real_data_s3}")
+            else:
+                print(f"[train_diffuser] Uploading real spectrograms to: {real_data_s3}")
+                _s3_put_torch({'signals': real_data.to(torch.float32).cpu()}, real_data_s3)
+
+            print(f"[train_diffuser] Dataset S3 check/upload complete")
+        else:
+            print(f"[train_diffuser] Saving condition spectrograms to: {cond_data_path}")
+            torch.save({'signals': cond_data.to(torch.float32).cpu()}, cond_data_path)
+            print(f"[train_diffuser] Saving real spectrograms to: {real_data_path}")
+            torch.save({'signals': real_data.to(torch.float32).cpu()}, real_data_path)
+            print(f"[train_diffuser] Saved both datasets")
     else:
         raise ValueError(f"Raw data not found at {raw_data_path}")
     
@@ -336,10 +448,23 @@ def train_diffuser(config: dict):
         'transform_type': transform_type,
         'pipeline_config': config.get('pipeline_config'),
     }
-    normalizer_path = data_dir / 'normalizer_params.pkl'
-    with open(normalizer_path, 'wb') as f:
-        pickle.dump(normalizer_params, f)
-    print(f"[train_diffuser] Normalizer params saved to: {normalizer_path}")
+    if s3_data_uri is not None:
+        from diffusion.aws.s3_io import s3_object_exists
+
+        if (not force_preprocess) and s3_object_exists(normalizer_s3):
+            print(f"[train_diffuser] Normalizer params already exist in S3; skipping upload: {normalizer_s3}")
+        else:
+            # Upload params as a small pickle blob.
+            buf = io.BytesIO()
+            pickle.dump(normalizer_params, buf)
+            _s3_put_bytes(buf.getvalue(), normalizer_s3)
+            print(f"[train_diffuser] Normalizer params uploaded to: {normalizer_s3}")
+    else:
+        assert data_dir is not None
+        normalizer_path = data_dir / 'normalizer_params.pkl'
+        with open(normalizer_path, 'wb') as f:
+            pickle.dump(normalizer_params, f)
+        print(f"[train_diffuser] Normalizer params saved to: {normalizer_path}")
     
     # Build diffuser and train
     diffuser, optimizer, lr_scheduler = build_diffuser(config)

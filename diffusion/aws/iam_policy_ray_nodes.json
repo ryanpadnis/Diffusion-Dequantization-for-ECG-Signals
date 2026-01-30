@@ -1,0 +1,28 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "S3ExpressDirectoryBucketSessions",
+      "Effect": "Allow",
+      "Action": [
+        "s3express:CreateSession",
+        "s3express:DeleteSession"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "S3DirectoryBucketProjectPrefix",
+      "Effect": "Allow",
+      "Action": [
+        "s3:ListBucket",
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:DeleteObject"
+      ],
+      "Resource": [
+        "arn:aws:s3:::ee269--use2-az1--x-s3",
+        "arn:aws:s3:::ee269--use2-az1--x-s3/ee269project/*"
+      ]
+    }
+  ]
+}
