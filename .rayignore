@@ -1,0 +1,7 @@
+# Prevent secrets/local AWS config from being shipped to Ray clusters
+# Ray uses this file to exclude paths when packaging the working directory.
+diffusion/aws/credentials
+diffusion/aws/config
+
+# Local virtualenv
+.venv/

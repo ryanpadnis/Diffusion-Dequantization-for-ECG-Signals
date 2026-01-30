@@ -243,6 +243,17 @@ data/processed/
 *.pkl
 *.pickle
 
+# Secrets / credentials (DO NOT COMMIT)
+*.numbers
+diffusion/aws/credentials
+diffusion/aws/config
+diffusion/aws/*key*
+diffusion/aws/*Key*
+diffusion/aws/*secret*
+diffusion/aws/*Secret*
+diffusion/aws/*access*
+diffusion/aws/*Access*
+
 # TensorBoard / training logs
 events.out.tfevents.*
 **/tensorboard/**

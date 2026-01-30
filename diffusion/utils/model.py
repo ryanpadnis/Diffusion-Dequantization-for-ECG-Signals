@@ -13,7 +13,7 @@ Extensible design for adding:
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from diffusers import UNet2DConditionModel, DDPMScheduler, DDIMScheduler
+from diffusion.utils.diffusion_models import UNet2DConditionModel, DDPMScheduler, DDIMScheduler
 from pathlib import Path
 from typing import Dict, Any, Optional, Literal
 from tqdm import tqdm

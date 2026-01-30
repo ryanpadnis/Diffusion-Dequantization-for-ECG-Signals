@@ -154,9 +154,9 @@ class DiffusionTrainer:
             stats['gpu_memory_allocated_mb'] = torch.cuda.memory_allocated() / 1024 / 1024
             stats['gpu_memory_reserved_mb'] = torch.cuda.memory_reserved() / 1024 / 1024
         
-        # MPS memory (Mac - no direct access, use system)
+        # MPS memory (Mac - no direct access; expose a numeric flag)
         if self.accelerator.device.type == 'mps':
-            stats['mps_device'] = 'active'
+            stats['mps_active'] = 1.0
         
         return stats
     
@@ -342,7 +342,11 @@ class DiffusionTrainer:
                 "train/loss": float(avg_loss),
                 "train/learning_rate": float(last_lr) if last_lr is not None else 0.0,
                 "train/epoch": float(epoch_step),
-                **{f"memory/{k}": float(v) for k, v in memory_stats.items()},
+                **{
+                    f"memory/{k}": float(v)
+                    for k, v in memory_stats.items()
+                    if isinstance(v, (int, float, bool))
+                },
             }
 
             if self.log_advanced_metrics and num_batches > 0:
