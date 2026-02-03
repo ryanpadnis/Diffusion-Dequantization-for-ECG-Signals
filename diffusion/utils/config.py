@@ -31,7 +31,7 @@ class DiffusionConfig:
     unet_type = "conditional"
     scheduler_type = "ddpm"
     num_noising_steps = 1000
-    image_size = (16, 128)  # (height, width)
+    image_size = (128, 64)  # (height, width)
     in_channels = 1
     out_channels = 1
 
@@ -51,29 +51,37 @@ class DiffusionConfig:
     
     # Data pipeline config
     pipeline_config = {
-        "transform": "stft",
-        "n_fft": 30,
-        "hop_length": 15,
-        "win_length": 30,
+        "transform": transform_type,
+        # Natural 128x64 STFT for 3600-sample chunks (no cropping):
+        # freq_bins = n_fft//2 + 1 = 128
+        # time_frames = 1 + floor(L / hop_length) = 64 when L in [3591, 3647]
+        "n_fft": 254,
+        "hop_length": 57,
+        "win_length": 254,
         "onesided": True,
-        "center": False,
+        "center": True,
     }
     
     # Training parameters
     learning_rate = 1e-4
     batch_size = 16
-    num_epochs = 100
+    num_epochs = 50
     epochs = 30
     gradient_accumulation_steps = 1
     num_workers = 0
     mixed_precision = None
     max_samples = None  # Limit dataset size for faster local testing 
-    max_batches = 100  # Limit to N batches for quick testing 
+    max_batches = None  # Limit to N batches for quick testing 
     
     # Checkpointing and validation
     save_every_n_epochs = 1
     validate_every_n_epochs = 1
     validation_split = 0.1
+
+    # Hold out a fixed test set that is never used in training/validation.
+    # By default, reserve the last N samples (stable across runs).
+    test_holdout_count = 5000
+    test_holdout_from_end = True
     
     # Optimizer
     optimizer_type = 'adamw'  # 'adamw', 'adam', or 'sgd'

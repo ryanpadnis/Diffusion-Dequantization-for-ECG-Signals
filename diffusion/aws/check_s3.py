@@ -64,7 +64,10 @@ def main() -> None:
     args = _parse_args()
 
     # Avoid long hangs when boto3 tries instance metadata on non-EC2 machines.
-    os.environ.setdefault("AWS_EC2_METADATA_DISABLED", "true")
+    # But do NOT disable IMDS on EC2/Anyscale nodes, because instance-role auth
+    # depends on it.
+    if os.environ.get("AWS_SHARED_CREDENTIALS_FILE") or os.environ.get("AWS_ACCESS_KEY_ID"):
+        os.environ.setdefault("AWS_EC2_METADATA_DISABLED", "true")
 
     _maybe_set_repo_aws_files(args.credentials_file, args.config_file)
 

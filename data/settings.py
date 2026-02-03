@@ -9,9 +9,12 @@ PROJECT_ROOT = Path(__file__).parent.parent
 RAW_DIR = PROJECT_ROOT / "data" / "data" / "raw"
 PROCESSED_DIR = PROJECT_ROOT /"data" / "data" / "processed"
 
-# Input files
-ART_SIGNALS_FILE = RAW_DIR / "art_signals.parquet"
-ART_CHUNKS_FILE = RAW_DIR / "art_chunks.pt"
+MITDB_DIR = RAW_DIR / "mitdb" / "1.0.0"
+MITDB_ECG_CHUNKS_FILE = RAW_DIR / "mitdb_ecg_chunks.pt"
+
+# PhysioNet MIT-BIH Arrhythmia Database (mitdb) mirror
+MITDB_DIR = RAW_DIR / "mitdb" / "1.0.0"
+MITDB_ECG_CHUNKS_FILE = RAW_DIR / "mitdb_ecg_chunks.pt"
 PREPROC_TRANSFORMS_FILE = PROCESSED_DIR / "signals_transforms.pt"
 
 # Output files
