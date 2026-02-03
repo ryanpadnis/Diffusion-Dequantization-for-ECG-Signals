@@ -118,13 +118,13 @@ def create_time_quantizer(config: dict, signals_time: torch.Tensor, bits: int) -
 
 def build_diffuser(config: dict):
     """Build diffuser model, optimizer, and scheduler from config."""
-    from diffusion.utils.model import create_diffuser, get_optimizer, get_lr_scheduler
+    from diffusion.utils.diffusion_models import create_diffuser, get_optimizer, get_lr_scheduler
     diffuser = create_diffuser(config)
     optimizer = get_optimizer(diffuser, config)
     lr_scheduler = None
     
     print(f"[build_diffuser] Created ConditionalDiffuser")
-    print(f"  - Image size: {config.get('image_size', (16, 128))}")
+    print(f"  - Image size: {config.get('image_size', (128, 64))}")
     print(f"  - Channels: {config.get('in_channels', 1)}")
     print(f"  - Optimizer: {type(optimizer).__name__}")
     
@@ -282,6 +282,35 @@ def train_diffuser(config: dict):
   
     force_preprocess = bool(config.get('force_preprocess', False))
 
+    # If a fixed test holdout is enabled, avoid silently reusing preprocessed
+    # datasets from a different regime.
+    test_holdout_count = int(config.get('test_holdout_count', 0) or 0)
+    test_holdout_from_end = bool(config.get('test_holdout_from_end', True))
+    if test_holdout_count > 0 and not force_preprocess:
+        try:
+            if s3_data_uri is None and data_dir is not None:
+                normalizer_path = data_dir / 'normalizer_params.pkl'
+                if normalizer_path.exists():
+                    import pickle
+                    with open(normalizer_path, 'rb') as f:
+                        norm_prev = pickle.load(f)
+                    prev_n = int(norm_prev.get('test_holdout_count', 0) or 0)
+                    prev_end = bool(norm_prev.get('test_holdout_from_end', True))
+                    if prev_n != test_holdout_count or prev_end != test_holdout_from_end:
+                        print('[train_diffuser] Holdout settings changed; forcing preprocess.')
+                        force_preprocess = True
+                else:
+                    print('[train_diffuser] Holdout enabled but no normalizer metadata found; forcing preprocess.')
+                    force_preprocess = True
+            elif s3_data_uri is not None:
+                # For S3 workflows, require explicit preprocessing for holdout changes.
+                # (Keeps logic simple and avoids mixing incompatible tensors.)
+                print('[train_diffuser] Holdout enabled with S3; forcing preprocess (set --force-preprocess to override cache).')
+                force_preprocess = True
+        except Exception:
+            print('[train_diffuser] Warning: could not validate existing holdout metadata; forcing preprocess.')
+            force_preprocess = True
+
     if (not force_preprocess) and s3_data_uri is not None:
         # Try S3 first.
         try:
@@ -332,6 +361,32 @@ def train_diffuser(config: dict):
         signals = load_data(raw_data_path)
         signals = signals.to(device)
         print(f"[train_diffuser] Loaded raw signals shape: {signals.shape}")
+
+        # Reserve a fixed hold-out test set so training/validation never uses it.
+        if test_holdout_count > 0:
+            n_total = int(signals.shape[0])
+            n_hold = min(int(test_holdout_count), n_total)
+            if n_hold <= 0 or n_hold >= n_total:
+                raise ValueError(
+                    f"Invalid test_holdout_count={test_holdout_count} for dataset size {n_total}. "
+                    "Set test_holdout_count to a smaller positive value."
+                )
+
+            if test_holdout_from_end:
+                train_signals = signals[:-n_hold]
+                test_signals = signals[-n_hold:]
+                test_slice = (n_total - n_hold, n_total)
+            else:
+                train_signals = signals[n_hold:]
+                test_signals = signals[:n_hold]
+                test_slice = (0, n_hold)
+
+            print(
+                f"[train_diffuser] Holding out {n_hold}/{n_total} samples for test "
+                f"(slice={test_slice[0]}:{test_slice[1]}). Training uses {train_signals.shape[0]} samples."
+            )
+            # Replace signals used for preprocessing/training.
+            signals = train_signals
 
         # Quantize in TIME DOMAIN first to create degraded (4-bit) and target (16-bit) waveforms.
         print(f"[train_diffuser] Time-domain quantization: {cond_bits}-bit condition, {real_bits}-bit target")
@@ -411,15 +466,25 @@ def train_diffuser(config: dict):
             cond_data = cond_data[:max_samples_for_batches]
             real_data = real_data[:max_samples_for_batches]
 
-    # Normalize SPECTROGRAM MAGNITUDES to [-1, 1] using the full-dataset ranges
-    print(f"[train_diffuser] Normalizing spectrogram magnitudes to [-1, 1]")
+    # Normalize using ONLY condition-derived ranges (deployment-aligned).
+    #
+    # For each sample i, compute cond_min[i], cond_max[i] over (H,W), then:
+    #   cond_norm = (cond - cond_min) / (cond_max-cond_min) -> [-1, 1]
+    #   real_norm = (real - cond_min) / (cond_max-cond_min) -> may exceed [-1, 1]
+    print(f"[train_diffuser] Normalizing spectrogram magnitudes using per-sample condition min/max")
 
     cond_data = cond_data.to(torch.float32)
     real_data = real_data.to(torch.float32)
 
-    cond_data = (cond_data - cond_mag_min) / (cond_mag_max - cond_mag_min + 1e-8)
+    # Per-sample condition ranges: shape [N, 1, 1, 1]
+    cond_min = cond_data.amin(dim=(2, 3), keepdim=True)
+    cond_max = cond_data.amax(dim=(2, 3), keepdim=True)
+    denom = cond_max - cond_min
+    denom = torch.where(denom.abs() < 1e-8, torch.ones_like(denom), denom)
+
+    cond_data = (cond_data - cond_min) / denom
     cond_data = cond_data * 2.0 - 1.0
-    real_data = (real_data - real_mag_min) / (real_mag_max - real_mag_min + 1e-8)
+    real_data = (real_data - cond_min) / denom
     real_data = real_data * 2.0 - 1.0
 
     # Cast tensors to specified dtype 
@@ -443,6 +508,9 @@ def train_diffuser(config: dict):
         'cond_mag_max': cond_mag_max,
         'real_mag_min': real_mag_min,
         'real_mag_max': real_mag_max,
+        'mag_normalization': 'condition_per_sample',
+        'test_holdout_count': int(test_holdout_count),
+        'test_holdout_from_end': bool(test_holdout_from_end),
         'cond_bits': int(cond_bits),
         'real_bits': int(real_bits),
         'transform_type': transform_type,
@@ -470,7 +538,7 @@ def train_diffuser(config: dict):
     diffuser, optimizer, lr_scheduler = build_diffuser(config)
     
     from diffusion.utils.trainer import DiffusionTrainer
-    from diffusion.utils.model import get_lr_scheduler
+    from diffusion.utils.diffusion_models import get_lr_scheduler
     
     # Calculate total training steps for lr scheduler
     batch_size = config.get('batch_size', 16)

@@ -87,7 +87,7 @@ class STFTTransform(SignalTransform):
             center=self.center,
         )
         
-        # Store magnitude and phase for perfect reconstruction
+    
         self.magnitude = torch.abs(stft_complex)
         self.phase = torch.angle(stft_complex)
         

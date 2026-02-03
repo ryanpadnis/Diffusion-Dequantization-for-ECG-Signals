@@ -796,6 +796,7 @@ dependencies = [
     { name = "awscli" },
     { name = "boto3" },
     { name = "diffusers" },
+    { name = "kagglehub" },
     { name = "matplotlib" },
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "numpy", version = "2.4.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
@@ -810,6 +811,7 @@ dependencies = [
     { name = "torch" },
     { name = "tqdm" },
     { name = "vitaldb" },
+    { name = "wfdb" },
 ]
 
 [package.metadata]
@@ -819,6 +821,7 @@ requires-dist = [
     { name = "awscli", specifier = ">=1.44.24" },
     { name = "boto3", specifier = ">=1.42.34" },
     { name = "diffusers", specifier = ">=0.35.0" },
+    { name = "kagglehub", specifier = ">=0.4.2" },
     { name = "matplotlib", specifier = ">=3.2.2" },
     { name = "numpy", specifier = ">=2.0.0" },
     { name = "pandas", specifier = ">=2.3.0" },
@@ -830,6 +833,7 @@ requires-dist = [
     { name = "torch", specifier = ">=2.8.0" },
     { name = "tqdm", specifier = ">=4.66.0" },
     { name = "vitaldb", specifier = ">=1.5.8" },
+    { name = "wfdb", specifier = ">=4.2.0" },
 ]
 
 [[package]]
@@ -1362,6 +1366,35 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/19/74/a633ee74eb36c44aa6d1095e7cc5569bebf04342ee146178e2d36600708b/jsonschema_specifications-2025.9.1.tar.gz", hash = "sha256:b540987f239e745613c7a9176f3edb72b832a4ac465cf02712288397832b5e8d", size = 32855, upload-time = "2025-09-08T01:34:59.186Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/41/45/1a4ed80516f02155c51f51e8cedb3c1902296743db0bbc66608a0db2814f/jsonschema_specifications-2025.9.1-py3-none-any.whl", hash = "sha256:98802fee3a11ee76ecaca44429fda8a41bff98b00a0f2838151b113f210cc6fe", size = 18437, upload-time = "2025-09-08T01:34:57.871Z" },
+]
+
+[[package]]
+name = "kagglehub"
+version = "0.4.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "kagglesdk" },
+    { name = "packaging" },
+    { name = "pyyaml" },
+    { name = "requests" },
+    { name = "tqdm" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/ca/03/c9ab638064a23d20ff44242f2b3d41c4609b33623225b94c91e7dfcef12e/kagglehub-0.4.2.tar.gz", hash = "sha256:b326087594286eb1d7d038d182d36cb1d6d220ca674f506882f1ca5af25eb5a4", size = 114742, upload-time = "2026-01-29T19:17:12.447Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/3f/77/efbee78013cabded0b59a280aca66b23e25365afbdfdda4764e8c2481965/kagglehub-0.4.2-py3-none-any.whl", hash = "sha256:7807d35409da653ef5ade22a33461c47f9138542b664a1d78056befa140ea3bb", size = 69273, upload-time = "2026-01-29T19:17:11.427Z" },
+]
+
+[[package]]
+name = "kagglesdk"
+version = "0.1.15"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "protobuf" },
+    { name = "requests" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/2d/1b/21bc2a37c7d194c4335a4f4a821ba42f706a0ea5b2ee4d338c8e04cf8b0e/kagglesdk-0.1.15.tar.gz", hash = "sha256:a26ecc64b1334b5a4c5cadd076bdeb503c04eab51c10d7cac2ff04959c9baba0", size = 120912, upload-time = "2026-01-15T23:20:08.485Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/1c/d8/71a8b9115ed2cf8b487c8976e66678311e82c73980e103eda15623abd6a5/kagglesdk-0.1.15-py3-none-any.whl", hash = "sha256:f7b49e795d5d0d72ba3612e6e6a1f39296978dbc7cd44d2015502e8bb1039738", size = 160357, upload-time = "2026-01-15T23:20:06.988Z" },
 ]
 
 [[package]]

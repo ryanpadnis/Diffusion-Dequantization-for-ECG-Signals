@@ -14,6 +14,7 @@ dependencies = [
     "numpy>=2.0.0",
     "pandas>=2.3.0",
     "scipy>=1.13.0",
+    "wfdb>=4.2.0",
     "torch>=2.8.0",
     "polars>=1.0.0",
     "tqdm>=4.66.0",
@@ -25,6 +26,7 @@ dependencies = [
     "anyscale>=0.26.0",
     "boto3>=1.42.34",
     "awscli>=1.44.24",
+    "kagglehub>=0.4.2",
 ]
 
 [tool.setuptools.packages.find]
