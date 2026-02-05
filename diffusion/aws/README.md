@@ -4,8 +4,15 @@ This folder contains optional helpers for syncing run artifacts to S3.
 
 ## Your bucket
 
+This repo originally used an S3 bucket in `us-east-2` ("use2").
+
+If you're switching to `us-east-1` ("use1"), create/use a bucket in `us-east-1` and use that region consistently in:
+- `diffusion.aws.check_s3 --region ...`
+- `diffusion.train.ray_train --s3-region ...`
+
+Example (old):
 - Bucket: `ee269--use2-az1--x-s3`
-- Region: `us-east-2` ("use2")
+- Region: `us-east-2`
 
 ## Local machine setup (Mac)
 
@@ -24,7 +31,7 @@ You have two common ways to provide credentials:
 - `aws configure`
   - AWS Access Key ID: (from your IAM user)
   - AWS Secret Access Key: (from your IAM user)
-  - Default region name: `us-east-2`
+  - Default region name: `us-east-1`
   - Default output format: `json`
 
 This writes to `~/.aws/credentials` and `~/.aws/config`.
@@ -37,6 +44,10 @@ In your terminal:
 - `export AWS_SECRET_ACCESS_KEY=...`
 - `export AWS_DEFAULT_REGION=us-east-2`
 
+If you're using `us-east-1`, set:
+
+- `export AWS_DEFAULT_REGION=us-east-1`
+
 This only lasts for that shell session.
 
 ## Verify access (smoke test)
@@ -44,6 +55,8 @@ This only lasts for that shell session.
 Run:
 
 - `uv run python -m diffusion.aws.check_s3 --bucket ee269--use2-az1--x-s3 --region us-east-2`
+
+If you're on `us-east-1`, use `--region us-east-1`.
 
 This will:
 - call STS `GetCallerIdentity`
@@ -54,7 +67,9 @@ This will:
 
 Once credentials work:
 
-- `uv run python -m diffusion.train.ray_train --s3 s3://ee269--use2-az1--x-s3/ee269project --s3-region us-east-2 --keep-last 3`
+Example:
+
+- `uv run python -m diffusion.train.ray_train --s3 s3://YOUR_BUCKET/ee269project --s3-region us-east-1 --keep-last 3`
 
 Notes:
 - This uploads `checkpoints/`, `samples/`, `logs/`, and the derived `data/` artifacts (saved tensors/normalizer params).
@@ -109,30 +124,83 @@ You still need an IAM role Anyscale can use to create instances in your AWS acco
 
 ### CLI workflow (recommended)
 
-Assuming your workspace is named `EE269` and your cloud/project are the defaults.
+Assuming your workspace is named `EE269`.
+
+If you are moving from `us-east-2` to `us-east-1`, you generally create a *new* Anyscale Cloud in `us-east-1`, then a compute config in that cloud, then a new workspace pointing at that cloud.
+
+1) Register a new Anyscale Cloud in `us-east-1` (AWS IDs required):
+
+- `uv run anyscale cloud register --provider aws --region us-east-1 --name EE269-use1 --vpc-id <vpc-...> --subnet-ids <subnet-...>,<subnet-...> --security-group-ids <sg-...> --anyscale-iam-role-id <arn:aws:iam::...:role/...> --instance-iam-role-id <arn:aws:iam::...:role/...> --cloud-storage-bucket-name s3://YOUR_BUCKET --cloud-storage-bucket-region us-east-1 --functional-verify workspace --yes`
+
+2) Create a compute config in that cloud (includes 1 GPU worker):
+
+- Edit `diffusion/aws/anyscale_compute_config_gpu_use1.yaml` (set `cloud:` to `EE269-use1`, and pick instance types)
+- `uv run anyscale compute-config create -n ee269-gpu-use1 -f diffusion/aws/anyscale_compute_config_gpu_use1.yaml`
+
+3) Create a workspace in that cloud using that compute config:
+
+- `uv run anyscale workspace_v2 create --name EE269-use1 --cloud EE269-use1 --compute-config ee269-gpu-use1`
 
 1) Start the workspace:
 
-- `uv run anyscale workspace_v2 start --name EE269`
+- `uv run anyscale workspace_v2 start --name EE269-use1`
 
 2) Wait until it’s running:
 
-- `uv run anyscale workspace_v2 wait --name EE269 --state RUNNING`
+- `uv run anyscale workspace_v2 wait --name EE269-use1 --state RUNNING`
 
 3) Run sanity checks inside the workspace (no SSH needed):
 
-- `uv run anyscale workspace_v2 run_command --name EE269 --command 'nvidia-smi'`
-- `uv run anyscale workspace_v2 run_command --name EE269 --command "python -c \"import ray; ray.init(address='auto'); print(ray.cluster_resources()); ray.shutdown()\""`
+- `uv run anyscale workspace_v2 run_command --name EE269-use1 'nvidia-smi'`
+- `uv run anyscale workspace_v2 run_command --name EE269-use1 "python -c \"import ray; ray.init(address='auto'); print(ray.cluster_resources()); ray.shutdown()\""`
 
 You should see `'GPU': 1.0` (or more) in `ray.cluster_resources()`.
 
 4) Verify S3 access from the workspace nodes (directory-bucket permissions):
 
-- `uv run anyscale workspace_v2 run_command --name EE269 --command 'uv run python -m diffusion.aws.check_s3 --bucket ee269--use2-az1--x-s3 --region us-east-2'`
+- `uv run anyscale workspace_v2 run_command --name EE269-use1 'uv run python -m diffusion.aws.check_s3 --bucket YOUR_BUCKET --region us-east-1'`
 
 5) Run training on the GPU worker:
 
-- `uv run anyscale workspace_v2 run_command --name EE269 --command 'uv run python -m diffusion.train.ray_train --ray-address auto --ray-num-gpus 1 --s3 s3://ee269--use2-az1--x-s3/ee269project --s3-region us-east-2 --keep-last 3'`
+- `uv run anyscale workspace_v2 run_command --name EE269-use1 'uv run python -m diffusion.train.ray_train --ray-address auto --ray-num-gpus 1 --s3 s3://YOUR_BUCKET/ee269project --s3-region us-east-1 --keep-last 3'`
+
+### Minimal worker installs (recommended)
+
+On Anyscale, packages you install on the head node do **not** automatically exist on newly launched GPU workers.
+
+If you rely on per-run bootstrapping, install only what training needs instead of `pip install -e .` (which pulls in EDA/data deps).
+
+Inside the workspace:
+
+- `python -m pip install -r diffusion/aws/requirements_train_minimal.txt`
+- `python -m pip install torch==2.10.0 --index-url https://download.pytorch.org/whl/cu118`
+
+Then run:
+
+- `python -m diffusion.train.ray_train --ray-address auto --ray-num-gpus 1 --s3 s3://YOUR_BUCKET/ee269project --s3-region us-east-1 --bundle-run`
+
+### Avoid per-run installs (recommended)
+
+If you don’t want to wait for package installation every time a new GPU worker launches, bake the minimal deps into the workspace environment:
+
+- Use [diffusion/aws/requirements_anyscale_gpu_cu128.txt](diffusion/aws/requirements_anyscale_gpu_cu128.txt) (updated to use cu118)
+
+Create a new workspace with `--requirements`, or update an existing workspace (typically requires it to be TERMINATED):
+
+- `uv run anyscale workspace_v2 update <WORKSPACE_ID> -r diffusion/aws/requirements_anyscale_gpu_cu128.txt`
+
+This installs GPU-enabled PyTorch + only the deps needed for training/S3 sync (not the whole project).
+
+### One-command launcher (recommended)
+
+From your local terminal (runs `anyscale workspace_v2 run_command` under the hood):
+
+- `uv run python -m diffusion.aws.anyscale_train --workspace EE269 --s3 s3://YOUR_BUCKET/ee269project --region us-east-1 --bundle-run`
+
+This will:
+
+- Start a 1-GPU Ray task to ensure minimal deps are installed on the GPU worker.
+- Launch training with S3 syncing and optional `--bundle-run`.
 
 ### SSH workflow (alternative)
 
@@ -140,11 +208,19 @@ If you prefer an interactive shell:
 
 - `uv run anyscale workspace_v2 ssh --name EE269`
 
+If your workspace is named `EE269-use1`:
+
+- `uv run anyscale workspace_v2 ssh --name EE269-use1`
+
 Then (inside the workspace):
 
 - `nvidia-smi`
 - `python -c "import ray; ray.init(address='auto'); print(ray.cluster_resources()); ray.shutdown()"`
 - `uv run python -m diffusion.train.ray_train --ray-address auto --ray-num-gpus 1 --s3 s3://ee269--use2-az1--x-s3/ee269project --s3-region us-east-2 --keep-last 3`
+
+Example:
+
+- `uv run python -m diffusion.train.ray_train --ray-address auto --ray-num-gpus 1 --s3 s3://YOUR_BUCKET/ee269project --s3-region us-east-1 --keep-last 3`
 
 ### How to confirm it’s using the right workspace + GPU
 
@@ -177,3 +253,16 @@ Notes:
 - A “GPU worker” requires a non-Free-Tier instance type, so GPU training implies paid usage (or credits).
 
 If you paste the exact “AWS connection” and “cluster node role” fields Anyscale shows you (or a screenshot of the cluster config page), I can tell you exactly where to attach the policy and what to pick for the cheapest GPU option.
+
+## S3 cost control helpers
+
+If you want to minimize S3 storage charges, you can delete cached tensors and/or run artifacts under your project prefix.
+
+- Delete cached preprocessed dataset (dry-run by default):
+  - `uv run python -m diffusion.aws.cleanup_project_s3 --s3 s3://YOUR_BUCKET/ee269project --region us-east-1 --what data`
+- Delete cached preprocessed dataset (actually delete):
+  - `uv run python -m diffusion.aws.cleanup_project_s3 --s3 s3://YOUR_BUCKET/ee269project --region us-east-1 --what data --yes`
+- Download an S3 prefix into your home directory:
+  - `uv run python -m diffusion.aws.s3_to_home --prefix s3://YOUR_BUCKET/ee269project/data/V1 --region us-east-1 --dst ~/ee269project_s3_backup`
+- Recreate (recompute+upload) the preprocessed cache after deletion:
+  - `uv run python -m diffusion.aws.recreate_s3_data --s3 s3://YOUR_BUCKET/ee269project --region us-east-1`

@@ -1,0 +1,15 @@
+# Minimal compute config for a 1-GPU training setup in us-east-1.
+# Edit `cloud:` to the Anyscale Cloud name you register in us-east-1 (we'll use: EE269).
+# Adjust instance types to match your quota/cost targets.
+
+cloud: EE269
+
+head_node:
+  instance_type: m5.xlarge
+
+worker_nodes:
+  - name: gpu-worker
+    instance_type: g6.xlarge
+    min_nodes: 0
+    max_nodes: 1
+    market_type: SPOT

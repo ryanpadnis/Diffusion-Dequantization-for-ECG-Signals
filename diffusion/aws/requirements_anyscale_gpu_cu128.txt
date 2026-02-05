@@ -1,0 +1,27 @@
+# Anyscale workspace requirements to avoid per-run installs.
+#
+# Apply at workspace creation/update time:
+#   uv run anyscale workspace_v2 update <WORKSPACE_ID> -r diffusion/aws/requirements_anyscale_gpu_cu128.txt
+# (Workspace typically must be TERMINATED to update requirements.)
+#
+# This installs a GPU-enabled torch wheel from the PyTorch CUDA 11.8 index.
+# Note: the "+cuXXX" suffix is not a valid version on these indexes; use plain torch==<ver>.
+
+--index-url https://download.pytorch.org/whl/cu118
+
+torch==2.10.0
+
+# Core numerical stack
+numpy
+scipy
+
+# Training stack
+diffusers
+accelerate
+safetensors
+tensorboard
+tqdm
+psutil
+
+# S3 sync
+boto3

@@ -37,7 +37,7 @@ def _maybe_set_repo_aws_files(credentials_file: str | None, config_file: str | N
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(add_help=True)
     p.add_argument("--bucket", type=str, required=True)
-    p.add_argument("--region", type=str, default="us-east-2")
+    p.add_argument("--region", type=str, default="us-east-1")
     p.add_argument("--prefix", type=str, default="ee269project/smoke-test")
     p.add_argument("--no-write", action="store_true", help="Only validate listing/head; do not put/delete test object.")
     p.add_argument(

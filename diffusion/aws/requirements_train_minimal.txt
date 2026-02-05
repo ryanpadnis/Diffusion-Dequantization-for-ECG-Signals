@@ -1,0 +1,24 @@
+# Minimal deps for *training* on Anyscale workers.
+# Intentionally excludes:
+# - torch (install separately with the correct CUDA wheel index URL)
+# - anyscale CLI / awscli / data download tooling / EDA tooling
+#
+# Use:
+#   python -m pip install -r diffusion/aws/requirements_train_minimal.txt
+# Then install torch with (GPU wheel):
+#   python -m pip install torch==2.10.0 --index-url https://download.pytorch.org/whl/cu118
+
+# Core numerical stack
+numpy
+scipy
+
+# Training stack
+diffusers
+accelerate
+safetensors
+tensorboard
+tqdm
+psutil
+
+# S3 sync (boto3 pulls botocore/urllib3/etc)
+boto3

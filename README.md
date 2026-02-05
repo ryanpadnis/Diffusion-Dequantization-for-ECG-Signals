@@ -1,6 +1,6 @@
 # EE269Project
 
-Diffusion Models for generating higher bit depth vital signs signals from VitalDB data.
+Diffusion Models for generating higher bit depth vital signs signals from Arhytmia data.
 
 ## Setup
 

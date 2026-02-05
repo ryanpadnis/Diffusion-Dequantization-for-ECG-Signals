@@ -27,7 +27,7 @@ def resolve_torch_dtype(config: Mapping[str, Any], device: Optional[torch.device
     if dev is None:
         dev = torch.device(config.get("device", "cpu"))
 
-    if dev.type == "cpu" and dtype == torch.float16:
+    if dev.type in {"cpu", "mps"} and dtype == torch.float16:
         return torch.float32
 
     return dtype

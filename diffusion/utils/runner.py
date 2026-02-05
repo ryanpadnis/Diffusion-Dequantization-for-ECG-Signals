@@ -25,7 +25,7 @@ def _resolve_torch_dtype(config: dict, device: str) -> torch.dtype:
         dtype = getattr(torch, str(dtype_val), torch.float32)
 
     dev = torch.device(device)
-    if dev.type == 'cpu' and dtype == torch.float16:
+    if dev.type in {'cpu', 'mps'} and dtype == torch.float16:
         return torch.float32
     return dtype
 
@@ -131,21 +131,10 @@ def build_diffuser(config: dict):
     return diffuser, optimizer, lr_scheduler
 
 
-def train_diffuser(config: dict):
-    """Main training orchestrator: load/create condition (4-bit) and real data (16-bit).
-    
-    Loads or processes two datasets:
-    - train_cond: Condition dataset at low bit depth (4-bit)
-    - train_data: Real data at high bit depth (16-bit)
-    
-    Config keys:
-    - raw_data_path: Path to raw data .pt file
-    - data_dir: Directory to store processed data
-    - bit_size: Bit depth for condition data (default: 4)
-    - real_bit_size: Bit depth for real data (default: 16)
-    - quantizer_type, transform_type, device, etc.
-    """
-
+def process_data_before_training(config:dict):
+    """Process raw data into condition and real datasets for training."""
+    #need to consider whether the s3 tag is in use for where to load eveyrhting into
+    #this is decuplped form the training loop so that we can do the processing step in s3 not the cluster
     epochs = config.get('epochs', 1)
     device = config.get('device', 'cpu')
     
@@ -204,6 +193,24 @@ def train_diffuser(config: dict):
                 f.write(chunk)
             f.seek(0)
             return torch.load(f)
+
+    def _s3_get_bytes(s3_uri: str) -> bytes:
+        from diffusion.aws.s3_io import split_s3_uri
+        from botocore.exceptions import ClientError  # type: ignore
+
+        bucket, key = split_s3_uri(s3_uri)
+        if not key:
+            raise ValueError(f"S3 URI must include a key: {s3_uri}")
+
+        client = _s3_client()
+        try:
+            resp = client.get_object(Bucket=bucket, Key=key)
+        except ClientError as e:
+            code = str(e.response.get('Error', {}).get('Code', ''))
+            if code in {'NoSuchKey', '404', 'NotFound'}:
+                raise FileNotFoundError(s3_uri) from e
+            raise
+        return resp['Body'].read()
 
     def _s3_put_torch(obj, s3_uri: str) -> None:
         from diffusion.aws.s3_io import split_s3_uri
@@ -303,10 +310,9 @@ def train_diffuser(config: dict):
                     print('[train_diffuser] Holdout enabled but no normalizer metadata found; forcing preprocess.')
                     force_preprocess = True
             elif s3_data_uri is not None:
-                # For S3 workflows, require explicit preprocessing for holdout changes.
-                # (Keeps logic simple and avoids mixing incompatible tensors.)
-                print('[train_diffuser] Holdout enabled with S3; forcing preprocess (set --force-preprocess to override cache).')
-                force_preprocess = True
+                # For S3 workflows, do not force preprocessing. We will reuse cached tensors from S3
+                # to avoid requiring raw_data_path on remote clusters.
+                pass
         except Exception:
             print('[train_diffuser] Warning: could not validate existing holdout metadata; forcing preprocess.')
             force_preprocess = True
@@ -486,6 +492,10 @@ def train_diffuser(config: dict):
     cond_data = cond_data * 2.0 - 1.0
     real_data = (real_data - cond_min) / denom
     real_data = real_data * 2.0 - 1.0
+    
+    # Clip to [-1, 1] to prevent numerical instability
+    cond_data = torch.clamp(cond_data, -1.0, 1.0)
+    real_data = torch.clamp(real_data, -1.0, 1.0)
 
     # Cast tensors to specified dtype 
     train_dtype = _resolve_torch_dtype(config, device)
@@ -533,7 +543,20 @@ def train_diffuser(config: dict):
         with open(normalizer_path, 'wb') as f:
             pickle.dump(normalizer_params, f)
         print(f"[train_diffuser] Normalizer params saved to: {normalizer_path}")
+    return cond_data, real_data, checkpoint_dir, samples_dir, logs_dir, epochs
+
+
+
+
+def train_diffuser(real_data,cond_data, checkpoint_dir, samples_dir, logs_dir, epochs, config: dict):
+    """
+    Trains a diffusionmodel using the config and the data needed
+    args:
+        data: data to be used for training
+        config: configuration dictionary
     
+    """
+
     # Build diffuser and train
     diffuser, optimizer, lr_scheduler = build_diffuser(config)
     

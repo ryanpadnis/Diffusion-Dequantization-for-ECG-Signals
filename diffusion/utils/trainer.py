@@ -179,12 +179,15 @@ class DiffusionTrainer:
             generator=torch.Generator().manual_seed(42)
         )
         
+        # Disable pin_memory if data is already on CUDA (avoids "cannot pin cuda tensor" error)
+        use_pin_memory = cond_data.device.type == 'cpu'
+        
         train_loader = DataLoader(
             train_dataset,
             batch_size=batch_size,
             shuffle=True,
             num_workers=num_workers,
-            pin_memory=True
+            pin_memory=use_pin_memory
         )
         
         val_loader = DataLoader(
@@ -192,7 +195,7 @@ class DiffusionTrainer:
             batch_size=batch_size,
             shuffle=False,
             num_workers=num_workers,
-            pin_memory=True
+            pin_memory=use_pin_memory
         ) if val_size > 0 else None
         
         print(f"[Trainer] Dataset split:")
@@ -234,6 +237,7 @@ class DiffusionTrainer:
         
         if self.accelerator.is_main_process:
             self.accelerator.init_trackers("diffusion_training")
+            print(f"[Trainer] Tensorboard logs: {self.logs_dir / 'diffusion_training'}")
         
         for epoch in range(self.current_epoch, epochs):
             self.current_epoch = epoch
@@ -272,6 +276,11 @@ class DiffusionTrainer:
         print(f"{'='*60}\n")
         
         if self.accelerator.is_main_process:
+            # Flush tensorboard logs before ending
+            writer = self._get_tb_writer()
+            if writer:
+                writer.flush()
+                print(f"[Trainer] Flushed tensorboard logs to: {self.logs_dir / 'diffusion_training'}")
             self.accelerator.end_training()
     
     def train_epoch(self, train_loader: DataLoader, epoch: int, total_epochs: int) -> float:
@@ -357,6 +366,11 @@ class DiffusionTrainer:
 
             if self.log_advanced_metrics and last_cond_batch is not None and last_real_batch is not None:
                 self._log_energy_curve(last_cond_batch, last_real_batch, step=epoch_step)
+            
+            # Flush tensorboard logs after each epoch
+            writer = self._get_tb_writer()
+            if writer:
+                writer.flush()
 
         return avg_loss
     

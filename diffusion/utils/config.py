@@ -11,14 +11,14 @@ import torch
 class DiffusionConfig:
     """Configuration for diffusion training."""
     
-    version = "V1"
+    version = "V1" #change this between runs 
 
     # Immutable project paths
     diffusion_root = settings.DIFFUSION_ROOT
     project_root = settings.PROJECT_ROOT
     data_root = settings.PROJECT_ROOT / "data"
-    raw_data_dir = data_root / "data" / "raw"
-    raw_data_path = raw_data_dir / "art_chunks.pt"
+    raw_data_dir = data_root / "data" / "processed"
+    raw_data_path = raw_data_dir / "arythmia_chunks.pt"
     
     # Version specific (include results dir)
     results_dir = diffusion_root / "results" / version
@@ -46,8 +46,7 @@ class DiffusionConfig:
     quantile_clip_lower = 0.0
     quantile_clip_upper = 99.5
 
-    # Regenerate processed datasets even if they exist (recommended when changing preprocessing).
-    force_preprocess = True
+    force_preprocess = False
     
     # Data pipeline config
     pipeline_config = {
@@ -69,9 +68,9 @@ class DiffusionConfig:
     epochs = 30
     gradient_accumulation_steps = 1
     num_workers = 0
-    mixed_precision = None
+    mixed_precision = "bf16"  # Use bfloat16 for numerical stability (prevents NaN losses)
     max_samples = None  # Limit dataset size for faster local testing 
-    max_batches = None  # Limit to N batches for quick testing 
+    max_batches = 100  # Limit to N batches for quick testing 
     
     # Checkpointing and validation
     save_every_n_epochs = 1
@@ -80,7 +79,7 @@ class DiffusionConfig:
 
     # Hold out a fixed test set that is never used in training/validation.
     # By default, reserve the last N samples (stable across runs).
-    test_holdout_count = 5000
+    test_holdout_count = 500
     test_holdout_from_end = True
     
     # Optimizer
@@ -97,11 +96,15 @@ class DiffusionConfig:
     # Sampling
     num_trajectories = 3  # Number of diverse samples per condition
     
-    # Device (cuda, mps, or cpu)
-    device = "cuda" if os.environ.get("CUDA_VISIBLE_DEVICES") else "cpu"
+    device = (
+        "cuda"
+        if torch.cuda.is_available()
+        else 'cpu'
+    )
 
     # Tensor dtype for model + data on device.
-    torch_dtype = "float16"
+    # Use bfloat16 instead of float16 for better numerical stability
+    torch_dtype = "bfloat16"
     
     # Random seed
     random_seed = 42
