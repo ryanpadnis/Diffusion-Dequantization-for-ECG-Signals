@@ -335,8 +335,11 @@ def process_data_before_training(config:dict):
             if real_data.ndim == 3:
                 real_data = real_data.unsqueeze(1)
 
-            print(f"[train_diffuser] Condition shape: {cond_data.shape}")
-            print(f"[train_diffuser] Real data shape: {real_data.shape}")
+            print(f"[train_diffuser] *** LOADED FROM S3 ***")
+            print(f"[train_diffuser] *** CODE VERSION: 2026-02-05-v2 ***")
+            print(f"[train_diffuser] Condition shape: {cond_data.shape} (samples: {cond_data.shape[0]})")
+            print(f"[train_diffuser] Real data shape: {real_data.shape} (samples: {real_data.shape[0]})")
+            print(f"[train_diffuser] Expected batches with batch_size=16: {cond_data.shape[0] // 16}")
         except FileNotFoundError:
             print("[train_diffuser] Preprocessed data not found in S3; will preprocess from raw.")
             cond_data = None

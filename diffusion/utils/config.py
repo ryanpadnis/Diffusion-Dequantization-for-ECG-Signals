@@ -30,7 +30,7 @@ class DiffusionConfig:
     # Diffusion Model Parameters
     unet_type = "conditional"
     scheduler_type = "ddpm"
-    num_noising_steps = 1000
+    num_noising_steps = 100
     image_size = (128, 64)  # (height, width)
     in_channels = 1
     out_channels = 1
@@ -46,7 +46,7 @@ class DiffusionConfig:
     quantile_clip_lower = 0.0
     quantile_clip_upper = 99.5
 
-    force_preprocess = False
+    force_preprocess = False  # Set to True or use --force-preprocess flag to regenerate from raw dataset
     
     # Data pipeline config
     pipeline_config = {
@@ -65,12 +65,12 @@ class DiffusionConfig:
     learning_rate = 1e-4
     batch_size = 16
     num_epochs = 50
-    epochs = 30
+    epochs = 50
     gradient_accumulation_steps = 1
     num_workers = 0
     mixed_precision = "bf16"  # Use bfloat16 for numerical stability (prevents NaN losses)
-    max_samples = None  # Limit dataset size for faster local testing 
-    max_batches = 100  # Limit to N batches for quick testing 
+    max_samples = None  # No limit - use all available samples
+    max_batches = None  # No limit - train on full dataset per epoch 
     
     # Checkpointing and validation
     save_every_n_epochs = 1
@@ -94,11 +94,11 @@ class DiffusionConfig:
     lr_warmup_steps = None  # None = warmup for first epoch automatically
     
     # Sampling
-    num_trajectories = 3  # Number of diverse samples per condition
+    num_trajectories = 16  # Number of diverse samples per condition
     
     device = (
         "cuda"
-        if torch.cuda.is_available()
+        if hasattr(torch, 'cuda') and torch.cuda.is_available()
         else 'cpu'
     )
 

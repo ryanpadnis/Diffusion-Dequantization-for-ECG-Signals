@@ -31,7 +31,7 @@ from typing import List, Optional
 
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(add_help=True)
-    p.add_argument("--workspace", type=str, default="EE269", help="Anyscale workspace name")
+    p.add_argument("--workspace", type=str, default="EE269-spot2", help="Anyscale workspace name")
     p.add_argument("--region", type=str, default="us-east-1", help="AWS region (default: us-east-1)")
     p.add_argument(
         "--s3",
@@ -43,6 +43,8 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--s3-sync-interval", type=float, default=30.0, help="Periodic S3 sync interval (seconds)")
     p.add_argument("--bundle-run", action="store_true", help="Create+upload a single run bundle tarball")
     p.add_argument("--bundle-include-data", action="store_true", help="Include results data/ in the run bundle")
+    p.add_argument("--force-preprocess", action="store_true", help="Force regenerate preprocessed data from raw dataset (uploads to S3)")
+    p.add_argument("--preprocess-locally", action="store_true", help="Run preprocessing locally BEFORE training (forces regeneration with current config)")
 
     # S3 data is automatically checked and prepared if missing (no flag needed)
 
@@ -106,6 +108,8 @@ def _remote_script(args: argparse.Namespace) -> str:
         train_flags.append("--bundle-run")
     if args.bundle_include_data:
         train_flags.append("--bundle-include-data")
+    if args.force_preprocess:
+        train_flags.append("--force-preprocess")
     if args.epochs is not None:
         train_flags.extend(["--epochs", str(int(args.epochs))])
     if args.max_batches is not None:
@@ -121,12 +125,23 @@ def _remote_script(args: argparse.Namespace) -> str:
     torch_index_url_py = repr(str(args.torch_index_url))
 
     script = f"""set -e
-
 cd ~/default
+
+# Set up signal handler to cancel Ray tasks on interrupt
+trap 'echo "Interrupt received, cancelling Ray tasks..."; ray stop || true; exit 130' INT TERM
+
+# Let Ray's runtime_env handle code syncing.
+# This script just ensures deps and launches the training.
+echo "[anyscale_train] Starting training script..."
+echo "[anyscale_train] Code is packaged by Ray's runtime_env."
+echo "[anyscale_train] Verifying config from runtime..."
+
+python -c "from diffusion.utils.config import DiffusionConfig; print(f'  -> Imported config with max_batches={{DiffusionConfig.max_batches}}')"
 
 export AWS_DEFAULT_REGION={shlex.quote(str(args.region))}
 export AWS_REGION={shlex.quote(str(args.region))}
 
+# Bootstrap minimal dependencies on the GPU worker node.
 python - <<'PY'
 import os, time, ray
 ray.init(address='auto')
@@ -134,21 +149,17 @@ ray.init(address='auto')
 @ray.remote(num_gpus=1)
 def ensure_training_deps():
     import sys, subprocess
-
-    def _ok():
-        try:
-            import torch  # noqa: F401
-            import diffusers  # noqa: F401
-            import accelerate  # noqa: F401
-            import boto3  # noqa: F401
-            return True
-        except Exception:
-            return False
-
-    if _ok():
+    # Minimal deps for training, should match requirements_train_minimal.txt
+    packages = ["torch", "diffusers", "accelerate", "boto3", "tensorboard"]
+    try:
+        for pkg in packages:
+            __import__(pkg)
         import torch
-        return {{'status': 'already_installed', 'torch': getattr(torch, '__version__', None), 'cuda': torch.cuda.is_available()}}
+        return {{'status': 'already_installed', 'torch': torch.__version__, 'cuda': torch.cuda.is_available()}}
+    except ImportError:
+        pass # Must install
 
+    print("-> Installing minimal training dependencies on worker...")
     subprocess.check_call([sys.executable, '-m', 'pip', 'install', '--upgrade', 'pip'])
     subprocess.check_call([sys.executable, '-m', 'pip', 'install', '-r', 'diffusion/aws/requirements_train_minimal.txt'])
     subprocess.check_call([
@@ -156,46 +167,26 @@ def ensure_training_deps():
         {torch_spec_py},
         '--index-url', {torch_index_url_py}
     ])
-
     import torch
-    return {{'status': 'installed', 'torch': getattr(torch, '__version__', None), 'cuda': torch.cuda.is_available()}}
+    return {{'status': 'installed', 'torch': torch.__version__, 'cuda': torch.cuda.is_available()}}
 
-print('[anyscale_train] ensuring worker deps...')
+print('[anyscale_train] Ensuring worker has dependencies...')
 start=time.time()
-last_err = None
-ref = None
-for attempt in range(1, 4):
-    try:
-        ref = ensure_training_deps.remote()
-        t0 = time.time()
-        while True:
-            ready, _ = ray.wait([ref], timeout=10.0)
-            if ready:
-                print(ray.get(ref))
-                last_err = None
-                ref = None
-                break
+try:
+    # Wait up to 10 minutes for a GPU worker to become available and install deps.
+    result = ray.get(ensure_training_deps.remote(), timeout=600)
+    print(f"[anyscale_train] Worker ready: {{result}}")
+except Exception as e:
+    print(f"[anyscale_train] ERROR: Failed to prepare worker node: {{e}}")
+    # Print cluster status to help debug autoscaler issues.
+    print("[anyscale_train] Current cluster resources:", ray.cluster_resources())
+    raise
 
-            # Periodic status while waiting for autoscaler/worker.
-            if int(time.time() - t0) % 30 == 0:
-                print('[anyscale_train] waiting for GPU worker... cluster_resources:', ray.cluster_resources())
-
-            if time.time() - t0 > 600.0:
-                raise TimeoutError('Timed out waiting for GPU worker / dep install task to complete.')
-
-        if last_err is None:
-            break
-    except Exception as e:
-        last_err = e
-        print("[anyscale_train] ensure_training_deps failed (attempt %d/3): %s: %s" % (attempt, type(e).__name__, e))
-        time.sleep(10.0 * attempt)
-
-if last_err is not None:
-    raise last_err
-print('[anyscale_train] deps done in', round(time.time()-start, 1), 's')
+print('[anyscale_train] Deps ready in {{round(time.time()-start, 1)}}s')
 ray.shutdown()
 PY
 
+# Launch the main training script
 {train_cmd}
 """
     return script
@@ -246,25 +237,48 @@ def _signal_handler(signum, frame):
     _interrupt_count += 1
     
     if _interrupt_count == 1:
-        print("\n\n⚠️  Interrupt received (Ctrl+C). Stopping remote jobs...")
-        print("    Press Ctrl+C again to force quit (jobs will continue running).\n")
+        print("\n\n⚠️  Interrupt received (Ctrl+C). Stopping training...")
+        print("    Press Ctrl+C again to force quit.\n")
         
-        # Kill the local process
+        # Send SIGINT to the remote process (will propagate to ray_train.py)
         if _remote_process and _remote_process.poll() is None:
-            _remote_process.terminate()
+            _remote_process.send_signal(signal.SIGINT)
+            print("[anyscale_train] Sent interrupt signal to remote command...")
+            
+            # Also try to stop Ray directly on the workspace
+            if _workspace_name:
+                print("[anyscale_train] Attempting to stop Ray tasks on workspace...")
+                prefix = _anyscale_cmd_prefix()
+                try:
+                    stop_cmd = [*prefix, "workspace_v2", "run_command", "--name", _workspace_name, "ray stop || true"]
+                    subprocess.run(stop_cmd, timeout=5, capture_output=True)
+                except Exception:
+                    pass  # Best effort
+            
             try:
-                _remote_process.wait(timeout=2)
+                _remote_process.wait(timeout=10)
+                print("[anyscale_train] Remote command stopped gracefully.")
             except subprocess.TimeoutExpired:
-                _remote_process.kill()
-        
-        # Stop remote jobs
-        if _workspace_name:
-            _stop_remote_jobs(_workspace_name)
+                print("[anyscale_train] Timeout waiting for remote command; terminating...")
+                _remote_process.terminate()
+                try:
+                    _remote_process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    _remote_process.kill()
         
         sys.exit(0)
     else:
-        print("\n⚠️  Force quit! Remote jobs may still be running.")
-        print(f"    To stop them manually: uv run anyscale workspace_v2 run_command --name {_workspace_name} 'ray job stop --all'\n")
+        print("\n⚠️  Force quit!")
+        # Kill immediately and stop Ray
+        if _remote_process and _remote_process.poll() is None:
+            _remote_process.kill()
+        if _workspace_name:
+            prefix = _anyscale_cmd_prefix()
+            try:
+                stop_cmd = [*prefix, "workspace_v2", "run_command", "--name", _workspace_name, "ray stop"]
+                subprocess.run(stop_cmd, timeout=3, capture_output=True)
+            except Exception:
+                pass
         sys.exit(1)
 
 
@@ -277,14 +291,14 @@ def main() -> None:
     # Set up signal handler for Ctrl+C
     signal.signal(signal.SIGINT, _signal_handler)
     
-    # Automatically check if S3 preprocessed data exists; prepare if missing
-    if args.s3:
+    # Local preprocessing option: regenerate data with current config before training
+    if args.preprocess_locally and args.s3:
         local_cmd = [
             "python",
             "-m",
             "diffusion.train.ray_train",
             "--no-ray",
-            "--prepare-s3-data-if-missing",
+            "--prepare-s3-data",  # Force regeneration (not --prepare-s3-data-if-missing)
             "--s3",
             str(args.s3),
             "--s3-region",
@@ -295,11 +309,17 @@ def main() -> None:
         if _have("uv"):
             local_cmd = ["uv", "run", *local_cmd]
 
-        print("[anyscale_train] Checking S3 data (preparing if missing)...")
+        print("[anyscale_train] Running local preprocessing with current config...")
+        print("[anyscale_train] This will regenerate and upload preprocessed data to S3.")
         subprocess.run(local_cmd, check=True)
-        print("[anyscale_train] S3 data check complete.")
+        print("[anyscale_train] Local preprocessing complete.")
+    
+    # Skip automatic S3 data check - let the remote workspace use existing S3 data
+    # (Local preprocessing fails on Mac due to torch compatibility issues)
+    # If you need preprocessing, use --preprocess-locally flag
 
-    # Run Anyscale CLI from local machine.
+    # The `anyscale workspace_v2 run_command` will use Ray's runtime_env
+    # to sync the local code. We don't need manual push/sync anymore.
     prefix = _anyscale_cmd_prefix()
 
     # One remote command string (bash). Needs to be a single CLI arg.

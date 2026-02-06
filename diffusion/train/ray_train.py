@@ -19,6 +19,8 @@ import json
 import os
 import subprocess
 import tarfile
+import signal
+import sys
 
 from diffusion.aws.ray_support import configure_aws_env, s3_sync_loop, s3_write_text
 
@@ -488,13 +490,43 @@ def _run_with_ray(
 				)
 				_s3_upload_file(bundle_path, _join_s3(s3_run_prefix, "bundle", bundle_path.name))
 
+	# Global for signal handler to cancel the task
+	_current_task_ref = None
+	_cancelled = False
+
+	def _cancel_handler(signum, frame):
+		nonlocal _cancelled
+		if _cancelled:
+			print("\n⚠️  Force quit!")
+			sys.exit(1)
+		_cancelled = True
+		print("\n⚠️  Interrupt received. Cancelling Ray task...")
+		if _current_task_ref:
+			try:
+				ray.cancel(_current_task_ref, force=True)
+				print("[ray_train] Task cancelled.")
+			except Exception as e:
+				print(f"[ray_train] Could not cancel task: {e}")
+		sys.exit(0)
+
+	# Set up signal handler
+	original_handler = signal.signal(signal.SIGINT, _cancel_handler)
+
 	try:
 		cfg_clean = _sanitize_for_ray(config)
-		ray.get(_train_task.remote(cfg_clean))
+		_current_task_ref = _train_task.remote(cfg_clean)
+		ray.get(_current_task_ref)
+	except KeyboardInterrupt:
+		_cancel_handler(signal.SIGINT, None)
 	finally:
-		# If we started local Ray, clean it up.
-		if address is None:
+		# Restore original handler
+		signal.signal(signal.SIGINT, original_handler)
+		# Always shut down Ray connection (local or remote)
+		try:
 			ray.shutdown()
+			print("[ray_train] Ray shutdown complete.")
+		except Exception as e:
+			print(f"[ray_train] Ray shutdown error (non-fatal): {e}")
 
 
 def _as_path_str(x) -> str:
@@ -623,6 +655,15 @@ def main() -> None:
 	configure_aws_env(region=str(args.s3_region))
 
 	config = DiffusionConfig.to_dict()
+
+	# Apply command-line arg overrides
+	if args.epochs is not None:
+		config["epochs"] = int(args.epochs)
+		config["num_epochs"] = int(args.epochs)
+	if args.max_batches is not None:
+		config["max_batches"] = int(args.max_batches)
+	if args.max_samples is not None:
+		config["max_samples"] = int(args.max_samples)
 
 	run_id = _ensure_run_id(config)
 

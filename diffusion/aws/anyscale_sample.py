@@ -221,23 +221,30 @@ def _signal_handler(signum, frame):
     _interrupt_count += 1
     
     if _interrupt_count == 1:
-        print("\n\n⚠️  Interrupt received (Ctrl+C). Stopping remote jobs...")
-        print("    Press Ctrl+C again to force quit (jobs will continue running).\n")
+        print("\n\n⚠️  Interrupt received (Ctrl+C). Stopping sampling...")
+        print("    Press Ctrl+C again to force quit.\n")
         
+        # Send SIGINT to the remote process (will propagate to ray_sample.py)
         if _remote_process and _remote_process.poll() is None:
-            _remote_process.terminate()
+            _remote_process.send_signal(signal.SIGINT)
+            print("[anyscale_sample] Sent interrupt signal to remote command...")
             try:
-                _remote_process.wait(timeout=2)
+                _remote_process.wait(timeout=10)
+                print("[anyscale_sample] Remote command stopped gracefully.")
             except subprocess.TimeoutExpired:
-                _remote_process.kill()
-        
-        if _workspace_name:
-            _stop_remote_jobs(_workspace_name)
+                print("[anyscale_sample] Timeout waiting for remote command; terminating...")
+                _remote_process.terminate()
+                try:
+                    _remote_process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    _remote_process.kill()
         
         sys.exit(0)
     else:
-        print(f"\n⚠️  Force quit! Remote jobs may still be running.")
-        print(f"    To stop them manually: uv run anyscale workspace_v2 run_command --name {_workspace_name} 'ray job stop --all'\n")
+        print("\n⚠️  Force quit!")
+        # Kill immediately
+        if _remote_process and _remote_process.poll() is None:
+            _remote_process.kill()
         sys.exit(1)
 
 
