@@ -560,6 +560,15 @@ def train_diffuser(real_data,cond_data, checkpoint_dir, samples_dir, logs_dir, e
     
     """
 
+    # Print a definitive version stamp to check for stale code
+    config_version = getattr(config, '__version__', 'N/A')
+    print(f"[train_diffuser] *** CONFIG VERSION: {config_version} ***")
+
+    # S3 data paths
+    s3_data_prefix = f"data/{config.version}"
+    s3_cond_path = f"{s3_data_prefix}/train_cond_{config.quant_type}_{config.quant_bits}bit.pt"
+    s3_real_path = f"{s3_data_prefix}/train_data_{config.quant_type}_{config.data_bits}bit.pt"
+
     # Build diffuser and train
     diffuser, optimizer, lr_scheduler = build_diffuser(config)
     

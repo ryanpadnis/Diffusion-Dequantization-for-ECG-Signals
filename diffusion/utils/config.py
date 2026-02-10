@@ -10,8 +10,11 @@ import torch
 
 class DiffusionConfig:
     """Configuration for diffusion training."""
-    
+    __version__ = "2026-02-05-v4"  # Hardcoded version to debug stale code
+
+    # Run metadata
     version = "V1" #change this between runs 
+    run_name = ""
 
     # Immutable project paths
     diffusion_root = settings.DIFFUSION_ROOT

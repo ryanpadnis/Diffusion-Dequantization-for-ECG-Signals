@@ -19,12 +19,17 @@ Example:
 from __future__ import annotations
 
 import argparse
+import datetime as _dt
+import hashlib
 import os
+from pathlib import Path
 import shlex
 import shutil
 import subprocess
 import signal
 import sys
+import tarfile
+import tempfile
 import time
 from typing import List, Optional
 
@@ -84,7 +89,98 @@ def _run(cmd: List[str]) -> None:
     subprocess.run(cmd, check=True)
 
 
-def _remote_script(args: argparse.Namespace) -> str:
+def _parse_s3_uri(uri: str) -> tuple[str, str]:
+    """Return (bucket, prefix) for s3://bucket[/optional/prefix]."""
+    if not uri.startswith("s3://"):
+        raise ValueError(f"Expected an s3:// URI, got: {uri!r}")
+    rest = uri[len("s3://") :]
+    bucket, _, prefix = rest.partition("/")
+    return bucket, prefix.strip("/")
+
+
+def _join_s3(bucket: str, *parts: str) -> str:
+    key = "/".join([p.strip("/") for p in parts if str(p).strip("/")])
+    return f"s3://{bucket}/{key}" if key else f"s3://{bucket}"
+
+
+def _git_sha_short(repo_root: Path) -> str:
+    try:
+        out = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], cwd=str(repo_root))
+        return out.decode("utf-8").strip()
+    except Exception:
+        return "nogit"
+
+
+def _make_code_bundle(repo_root: Path) -> Path:
+    """Create a small tar.gz of the repo (excluding big artifacts) and return its path."""
+    excludes_dir_parts = {
+        ".git",
+        ".venv",
+        "__pycache__",
+        "ee269project.egg-info",
+    }
+
+    def should_skip(path: Path) -> bool:
+        rel = path.relative_to(repo_root)
+        parts = set(rel.parts)
+        if parts & excludes_dir_parts:
+            return True
+
+        rel_posix = rel.as_posix()
+        if rel_posix.startswith("diffusion/results/"):
+            return True
+        if rel_posix.startswith("data/data/raw/"):
+            return True
+        if rel_posix.startswith("data/data/processed/"):
+            return True
+        if rel.suffix in {".pt", ".pth", ".ckpt"}:
+            return True
+        return False
+
+    tmpdir = Path(tempfile.mkdtemp(prefix="ee269_code_bundle_"))
+    ts = _dt.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    sha = _git_sha_short(repo_root)
+
+    # Content hash makes bundle keys stable-ish and helps debugging.
+    h = hashlib.sha1()
+    for p in sorted(repo_root.rglob("*.py")):
+        if should_skip(p):
+            continue
+        try:
+            h.update(p.read_bytes())
+        except Exception:
+            continue
+    digest = h.hexdigest()[:10]
+
+    bundle_path = tmpdir / f"code_{ts}_{sha}_{digest}.tar.gz"
+    with tarfile.open(bundle_path, mode="w:gz") as tf:
+        for path in repo_root.rglob("*"):
+            if not path.is_file():
+                continue
+            if should_skip(path):
+                continue
+            arcname = path.relative_to(repo_root)
+            tf.add(path, arcname=str(arcname))
+
+    return bundle_path
+
+
+def _upload_file_to_s3(*, local_path: Path, s3_uri: str, region: str) -> None:
+    bucket, key = _parse_s3_uri(s3_uri)
+    if not key:
+        raise ValueError(f"Expected full s3://bucket/key URI, got: {s3_uri!r}")
+    try:
+        import boto3
+    except ModuleNotFoundError as e:
+        raise RuntimeError(
+            "boto3 is required to upload the code bundle. Install with: uv pip install boto3"
+        ) from e
+
+    s3 = boto3.client("s3", region_name=str(region) if region else None)
+    s3.upload_file(str(local_path), bucket, key)
+
+
+def _remote_script(args: argparse.Namespace, *, code_bundle_s3_uri: str) -> str:
     # This string is executed *inside the workspace*.
     # It installs minimal deps on a GPU worker via a 1-GPU Ray task, then launches training.
 
@@ -125,21 +221,52 @@ def _remote_script(args: argparse.Namespace) -> str:
     torch_index_url_py = repr(str(args.torch_index_url))
 
     script = f"""set -e
-cd ~/default
-
-# Set up signal handler to cancel Ray tasks on interrupt
-trap 'echo "Interrupt received, cancelling Ray tasks..."; ray stop || true; exit 130' INT TERM
-
-# Let Ray's runtime_env handle code syncing.
-# This script just ensures deps and launches the training.
-echo "[anyscale_train] Starting training script..."
-echo "[anyscale_train] Code is packaged by Ray's runtime_env."
-echo "[anyscale_train] Verifying config from runtime..."
-
-python -c "from diffusion.utils.config import DiffusionConfig; print(f'  -> Imported config with max_batches={{DiffusionConfig.max_batches}}')"
 
 export AWS_DEFAULT_REGION={shlex.quote(str(args.region))}
 export AWS_REGION={shlex.quote(str(args.region))}
+
+# IMPORTANT: Avoid using ~/default (stale workspace checkout).
+# We always run from a fresh code bundle uploaded from your laptop.
+WORKDIR=$(mktemp -d /tmp/ee269_run_XXXXXX)
+echo "[anyscale_train] Using WORKDIR=$WORKDIR"
+
+# Ensure boto3 exists on the head node for downloading the bundle.
+python -c "import boto3" >/dev/null 2>&1 || python -m pip install -q boto3
+
+python - <<'PY'
+import os
+import tarfile
+from pathlib import Path
+
+import boto3
+
+bundle_uri = {code_bundle_s3_uri!r}
+if not bundle_uri.startswith("s3://"):
+    raise RuntimeError(f"Expected s3:// bundle uri, got: {{bundle_uri}}")
+rest = bundle_uri[len("s3://"):]
+bucket, _, key = rest.partition("/")
+if not bucket or not key:
+    raise RuntimeError(f"Bad bundle uri: {{bundle_uri}}")
+
+workdir = Path(os.environ["WORKDIR"])
+tar_path = workdir / "code_bundle.tar.gz"
+
+s3 = boto3.client("s3")
+s3.download_file(bucket, key, str(tar_path))
+
+with tarfile.open(tar_path, mode="r:gz") as tf:
+    tf.extractall(path=str(workdir))
+
+print(f"[anyscale_train] Downloaded+extracted code bundle to {{workdir}}")
+PY
+
+cd "$WORKDIR"
+
+echo "[anyscale_train] Verifying config from bundle..."
+python -c "from diffusion.utils.config import DiffusionConfig; print(f'  -> config.__version__={{getattr(DiffusionConfig, '__version__', 'N/A')}} max_batches={{DiffusionConfig.max_batches}}')"
+
+# IMPORTANT: Do NOT `ray stop` on Ctrl+C (that kills the whole cluster).
+trap 'echo "[anyscale_train] Interrupt received. Exiting without ray stop."; exit 130' INT TERM
 
 # Bootstrap minimal dependencies on the GPU worker node.
 python - <<'PY'
@@ -245,12 +372,19 @@ def _signal_handler(signum, frame):
             _remote_process.send_signal(signal.SIGINT)
             print("[anyscale_train] Sent interrupt signal to remote command...")
             
-            # Also try to stop Ray directly on the workspace
+            # Best-effort: stop Ray *jobs* (do not ray stop the cluster).
             if _workspace_name:
-                print("[anyscale_train] Attempting to stop Ray tasks on workspace...")
+                print("[anyscale_train] Attempting to stop Ray jobs on workspace...")
                 prefix = _anyscale_cmd_prefix()
                 try:
-                    stop_cmd = [*prefix, "workspace_v2", "run_command", "--name", _workspace_name, "ray stop || true"]
+                    stop_cmd = [
+                        *prefix,
+                        "workspace_v2",
+                        "run_command",
+                        "--name",
+                        _workspace_name,
+                        "ray job stop --all || true",
+                    ]
                     subprocess.run(stop_cmd, timeout=5, capture_output=True)
                 except Exception:
                     pass  # Best effort
@@ -275,7 +409,14 @@ def _signal_handler(signum, frame):
         if _workspace_name:
             prefix = _anyscale_cmd_prefix()
             try:
-                stop_cmd = [*prefix, "workspace_v2", "run_command", "--name", _workspace_name, "ray stop"]
+                stop_cmd = [
+                    *prefix,
+                    "workspace_v2",
+                    "run_command",
+                    "--name",
+                    _workspace_name,
+                    "ray job stop --all || true",
+                ]
                 subprocess.run(stop_cmd, timeout=3, capture_output=True)
             except Exception:
                 pass
@@ -318,12 +459,21 @@ def main() -> None:
     # (Local preprocessing fails on Mac due to torch compatibility issues)
     # If you need preprocessing, use --preprocess-locally flag
 
-    # The `anyscale workspace_v2 run_command` will use Ray's runtime_env
-    # to sync the local code. We don't need manual push/sync anymore.
+    # Create + upload a small code bundle to S3 for this run.
+    # This avoids stale ~/default checkouts and avoids rsync workspace push failures.
+    repo_root = Path(__file__).resolve().parents[2]
+    bundle_path = _make_code_bundle(repo_root)
+    bucket, prefix = _parse_s3_uri(str(args.s3))
+    bundle_key_prefix = f"{prefix}/code_bundles" if prefix else "code_bundles"
+    code_bundle_s3_uri = _join_s3(bucket, bundle_key_prefix, bundle_path.name)
+    print(f"[anyscale_train] Uploading code bundle to {code_bundle_s3_uri} ...")
+    _upload_file_to_s3(local_path=bundle_path, s3_uri=code_bundle_s3_uri, region=str(args.region))
+    print("[anyscale_train] Code bundle uploaded.")
+
     prefix = _anyscale_cmd_prefix()
 
     # One remote command string (bash). Needs to be a single CLI arg.
-    remote = _remote_script(args)
+    remote = _remote_script(args, code_bundle_s3_uri=code_bundle_s3_uri)
 
     cmd = [
         *prefix,
