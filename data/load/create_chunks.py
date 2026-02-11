@@ -45,39 +45,39 @@ def chunk_kaggle_ekg_signals(kaggle_dir: Path, sequence_length=3600, stride=3600
     import torch
     csvs = _iter_kaggle_ekg_csvs(kaggle_dir)
     print(f"Found {len(csvs)} EKG CSVs in {kaggle_dir}")
-    arythmia_chunks = []
-    non_arythmia_chunks = []
-    arythmia_names = []
-    non_arythmia_names = []
+    arrhythmia_chunks = []
+    non_arrhythmia_chunks = []
+    arrhythmia_names = []
+    non_arrhythmia_names = []
     for csv_path in tqdm(csvs, desc="Chunking Kaggle EKGs"):
         record_name, chunks = chunk_kaggle_ekg_csv(csv_path, sequence_length, stride, lead_name, torch_dtype)
         if not chunks:
             continue
-        # Heuristic: if annotation file exists for this record, treat as arythmia
+        # Heuristic: if annotation file exists for this record, treat as arrhythmia
         ann_path = csv_path.parent / f"{csv_path.name.split('_')[0]}_annotations_1.csv"
         if ann_path.exists():
-            arythmia_chunks.extend(chunks)
-            arythmia_names.extend([record_name]*len(chunks))
+            arrhythmia_chunks.extend(chunks)
+            arrhythmia_names.extend([record_name]*len(chunks))
         else:
-            non_arythmia_chunks.extend(chunks)
-            non_arythmia_names.extend([record_name]*len(chunks))
+            non_arrhythmia_chunks.extend(chunks)
+            non_arrhythmia_names.extend([record_name]*len(chunks))
     # Save
     processed_dir = settings.PROCESSED_DIR
     processed_dir.mkdir(parents=True, exist_ok=True)
-    if arythmia_chunks:
-        ar_chunks_tensor = torch.stack(arythmia_chunks)
-        torch.save({"chunks": ar_chunks_tensor, "record_names": arythmia_names}, processed_dir/"arythmia_chunks.pt")
-        print(f"Saved arythmia chunks: {ar_chunks_tensor.shape} to {processed_dir/'arythmia_chunks.pt'}")
+    if arrhythmia_chunks:
+        ar_chunks_tensor = torch.stack(arrhythmia_chunks)
+        torch.save({"chunks": ar_chunks_tensor, "record_names": arrhythmia_names}, processed_dir/"arrhythmia_chunks.pt")
+        print(f"Saved arrhythmia chunks: {ar_chunks_tensor.shape} to {processed_dir/'arrhythmia_chunks.pt'}")
     else:
-        print("No arythmia chunks found.")
-    if non_arythmia_chunks:
-        nonar_chunks_tensor = torch.stack(non_arythmia_chunks)
-        torch.save({"chunks": nonar_chunks_tensor, "record_names": non_arythmia_names}, processed_dir/"non_arythmia_chunks.pt")
-        print(f"Saved non-arythmia chunks: {nonar_chunks_tensor.shape} to {processed_dir/'non_arythmia_chunks.pt'}")
+        print("No arrhythmia chunks found.")
+    if non_arrhythmia_chunks:
+        nonar_chunks_tensor = torch.stack(non_arrhythmia_chunks)
+        torch.save({"chunks": nonar_chunks_tensor, "record_names": non_arrhythmia_names}, processed_dir/"non_arrhythmia_chunks.pt")
+        print(f"Saved non-arrhythmia chunks: {nonar_chunks_tensor.shape} to {processed_dir/'non_arrhythmia_chunks.pt'}")
     else:
-        print("No non-arythmia chunks found.")
+        print("No non-arrhythmia chunks found.")
     # Print concatenated dataset shape
-    all_chunks = arythmia_chunks + non_arythmia_chunks
+    all_chunks = arrhythmia_chunks + non_arrhythmia_chunks
     if all_chunks:
         all_tensor = torch.stack(all_chunks)
         print(f"Final concatenated dataset shape: {all_tensor.shape}")

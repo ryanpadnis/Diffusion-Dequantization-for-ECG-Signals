@@ -99,7 +99,7 @@ def process_signals(quantizers: List[str], transforms: List[str], bits_list: Lis
 
 
 if __name__ == "__main__":
-    input_file = str(settings.PROCESSED_DIR / "arythmia_chunks.pt")
+    input_file = str(settings.PROCESSED_DIR / "arrhythmia_chunks.pt")
     output_dir = str(settings.PROCESSED_DIR)
 
     process_signals(

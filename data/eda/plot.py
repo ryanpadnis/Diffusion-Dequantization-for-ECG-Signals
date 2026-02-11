@@ -39,7 +39,7 @@ def compute_snr_mse(original, reconstructed):
 
 def _load_original_chunks() -> torch.Tensor:
     processed = Path(settings.PROCESSED_DIR)
-    orig_file = processed / "arythmia_chunks.pt"
+    orig_file = processed / "arrhythmia_chunks.pt"
     orig_obj = torch.load(orig_file, map_location="cpu")
     if isinstance(orig_obj, dict) and "chunks" in orig_obj:
         return orig_obj["chunks"]
