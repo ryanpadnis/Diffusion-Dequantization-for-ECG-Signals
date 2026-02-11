@@ -21,7 +21,7 @@ class DiffusionConfig:
     project_root = settings.PROJECT_ROOT
     data_root = settings.PROJECT_ROOT / "data"
     raw_data_dir = data_root / "data" / "processed"
-    raw_data_path = raw_data_dir / "arythmia_chunks.pt"
+    raw_data_path = raw_data_dir / "arrhythmia_chunks.pt"
     
     # Version specific (include results dir)
     results_dir = diffusion_root / "results" / version

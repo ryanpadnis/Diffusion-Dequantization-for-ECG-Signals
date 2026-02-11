@@ -1,11 +1,11 @@
 # EE269Project
 
-Diffusion Models for generating higher bit depth vital signs signals from Arhytmia data.
+Diffusion Models for generating higher bit depth vital signs signals from arrhythmia data.
 
 ## Setup
 
 ### Requirements
-- Python 3.9+
+- Python 3.10+
 - `uv` package manager ([install](https://docs.astral.sh/uv/getting-started/installation/))
 
 ### Installation
@@ -28,29 +28,27 @@ This creates a `.venv` environment and installs all dependencies from `pyproject
 All scripts use `uv run` (no activation needed):
 
 ```bash
-# Load VitalDB records
-uv run python data/load/load.py
+# Load VitalDB records from kaggle
+uv run python data/load/download_kaggle_mitdb.py
 
 # Chunk signals into sequences
-uv run python data/preprocess/chunk.py
+uv run python data/load/create_chunks.py
 
-# Compute STFT
-uv run python data/preprocess/transform.py
+# Process with quantizing and then STFT
+uv run python data/preprocess/process.py
 
-# Visualize signals
-uv run python data/visualize_chunks.py
 ```
 
 ## Data Pipeline
 
-1. **Load** (`data/load/load.py`) - Download ART signals from VitalDB
-   - Saves to `data/raw/art_signals.parquet`
+1. **Download** (`uv run python data/load/download_kaggle_mitdb.py`) - Download VitalDB signals converted into CSVs from Kaggle
+   - Saves to `data/data/raw/mitdb_kaggle`
 
-2. **Chunk** (`data/preprocess/chunk.py`) - Split into 512-sample sequences
-   - Saves to `data/raw/art_chunks.pt`
+2. **Chunk** (`v run python data/load/create_chunks.py`) - Split into 512-sample sequences
+   - Saves to `data/data/processed/arrhythmia_chunks.pt`
 
-3. **Transform** (`data/preprocess/transform.py`) - Compute STFT
-   - Saves to `data/raw/train_stft.pt`, etc.
+3. **Process** (`data/preprocess/process.py`) - Quantize and compute STFT
+   - Saves to `data/data/processed/signals_{description}.pt`, etc. 
 
 ## Dependencies
 
