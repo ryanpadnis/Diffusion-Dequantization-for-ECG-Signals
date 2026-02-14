@@ -100,6 +100,12 @@ def _parse_args() -> argparse.Namespace:
 		help="Override config['max_batches'].",
 	)
 	p.add_argument(
+		"--resume-from-s3",
+		type=str,
+		default=None,
+		help="Resume training from an S3 run. Pass 'latest' or a specific run_id.",
+	)
+	p.add_argument(
 		"--max-samples",
 		type=int,
 		default=None,
@@ -399,6 +405,25 @@ def _run_with_ray(
 		from diffusion.utils.runner import process_data_before_training as _prep
 		from diffusion.utils.runner import train_diffuser as _train
 
+		# Handle resume from S3 on the worker node.
+		if cfg.get("_resume_s3_uri"):
+			print(f"[ray_train worker] Found request to resume from: {cfg['_resume_s3_uri']}")
+			try:
+				from diffusion.aws.s3_io import download_file
+				# Download to a stable path on the worker.
+				# Use config['results_dir'] if absolute, or resolve it.
+				# But results_dir is from config, which might be user laptop path.
+				# Use a local tmp file or relative path.
+				local_ckpt = Path("resumed_checkpoint.pt").resolve()
+				print(f"[ray_train worker] Downloading checkpoint from S3 to: {local_ckpt}")
+				download_file(cfg["_resume_s3_uri"], local_ckpt)
+				cfg["resume_from"] = str(local_ckpt)
+				print(f"[ray_train worker] Successfully downloaded checkpoint.")
+			except Exception as e:
+				print(f"[ray_train worker] Failed to download checkpoint: {e}")
+				# Don't crash; start fresh if resume fails.
+				pass
+
 		
 		requested = float(num_gpus or 0.0)
 		if requested > 0 and str(cfg.get("device") or "").lower() in {"", "cpu"}:
@@ -449,6 +474,12 @@ def _run_with_ray(
 			print(f"[ray_train.worker] Started periodic S3 sync every {interval_s:.1f}s -> {s3_run_prefix}")
 
 		try:
+			try:
+				import json as _json
+				print("[ray_train.worker] Config dump:\n" + _json.dumps(cfg, indent=2, sort_keys=True))
+			except Exception as e:
+				print(f"[ray_train.worker] Config dump failed (non-fatal): {e}")
+
 			cond_data, real_data, ckpt_dir, samp_dir, lg_dir, n_epochs = _prep(cfg)
 			_train(real_data, cond_data, ckpt_dir, samp_dir, lg_dir, int(n_epochs), cfg)
 		finally:
@@ -665,6 +696,78 @@ def main() -> None:
 	if args.max_samples is not None:
 		config["max_samples"] = int(args.max_samples)
 
+	if args.resume_from_s3:
+		if not args.s3:
+			print("[ray_train] Error: --resume-from-s3 requires --s3")
+			sys.exit(1)
+
+		print(f"[ray_train] Attempting to resume from S3 run: {args.resume_from_s3}")
+		from diffusion.aws.s3_io import (
+			normalize_s3_uri, join_s3_uri, split_s3_uri, list_run_prefixes, download_file
+		)
+		import boto3
+
+		# Reconstruct where runs live
+		s3_base = normalize_s3_uri(args.s3)
+		version = str(getattr(DiffusionConfig, "version", "V1"))
+		s3_runs_parent = join_s3_uri(s3_base, "diffusion-results", version)
+
+		target = args.resume_from_s3
+		if target.strip().lower() == "latest":
+			print(f"[ray_train] Listing runs in {s3_runs_parent}...")
+			try:
+				runs = list_run_prefixes(s3_runs_parent)
+				if not runs:
+					print("[ray_train] No existing runs found to resume from.")
+					target = None
+				else:
+					runs.sort(key=lambda x: x[1])  # Sort by timestamp
+					target_uri = runs[-1][0]
+					target = target_uri.rstrip("/").split("/")[-1]
+					print(f"[ray_train] Resolved 'latest' to run_id: {target}")
+			except Exception as e:
+				print(f"[ray_train] Warning: Failed to list runs: {e}")
+				target = None
+
+		if target:
+			chk_prefix = join_s3_uri(s3_runs_parent, target, "checkpoints")
+			bucket, prefix = split_s3_uri(chk_prefix)
+			s3 = boto3.client("s3", region_name=args.s3_region)
+
+			print(f"[ray_train] Looking for checkpoints in {chk_prefix}...")
+			try:
+				resp = s3.list_objects_v2(Bucket=bucket, Prefix=prefix + "/")
+				contents = resp.get("Contents", [])
+
+				best_key = None
+				# Prefer best_model.pt
+				for obj in contents:
+					if obj["Key"].endswith("/best_model.pt"):
+						best_key = obj["Key"]
+						break
+
+				# Fallback to latest checkpoint_epoch_*.pt
+				if not best_key:
+					candidates = []
+					for obj in contents:
+						k = obj["Key"]
+						if k.endswith(".pt") and "checkpoint_epoch_" in k:
+							candidates.append((k, obj["LastModified"]))
+					if candidates:
+						candidates.sort(key=lambda x: x[1])
+						best_key = candidates[-1][0]
+
+				if best_key:
+					s3_uri = f"s3://{bucket}/{best_key}"
+					print(f"[ray_train] Resolved resume target: {s3_uri}")
+					# Pass S3 URI to worker; do not download on head node.
+					config["_resume_s3_uri"] = s3_uri
+				else:
+					print(f"[ray_train] Warning: No valid checkpoints found in {chk_prefix}")
+
+			except Exception as e:
+				print(f"[ray_train] Warning: Failed to fetch checkpoint metadata: {e}")
+
 	run_id = _ensure_run_id(config)
 
 	for k in ["results_dir", "checkpoint_dir", "logs_dir", "samples_dir", "data_dir", "raw_data_path"]:
@@ -728,7 +831,7 @@ def main() -> None:
 			print(f"[ray_train] Preprocessed S3 data already present; skipping: {s3_data_uri}")
 		else:
 			print(f"[ray_train] Preprocessed S3 data missing; preprocessing+uploading to: {s3_data_uri}")
-			config["force_preprocess"] = False
+			config["force_preprocess"] = True
 			process_data_before_training(config)
 		print("[ray_train] S3 data check complete; exiting.")
 		# Stop background sync thread before exit.

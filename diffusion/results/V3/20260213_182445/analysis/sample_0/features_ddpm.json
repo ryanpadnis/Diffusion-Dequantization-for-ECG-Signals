@@ -1,0 +1,83 @@
+{
+  "cond_4bit": {
+    "rms": 0.3095085620880127,
+    "spec_bandwidth_bin": 135.90266015983048,
+    "spec_centroid_bin": 112.82980570633399,
+    "spec_energy": 344.672607421875,
+    "spec_flatness": 0.027146704494953156,
+    "spec_rolloff95_bin": 263,
+    "time_energy": 0.09579554945230484
+  },
+  "gen_0": {
+    "rms": 0.2526867091655731,
+    "spec_bandwidth_bin": 524.1049552974958,
+    "spec_centroid_bin": 880.294665745919,
+    "spec_energy": 229.76104736328125,
+    "spec_flatness": 0.5144006013870239,
+    "spec_rolloff95_bin": 1705,
+    "time_energy": 0.06385056674480438
+  },
+  "gen_0_condminmax": {
+    "rms": 0.15720264613628387,
+    "spec_bandwidth_bin": 524.1049619224268,
+    "spec_centroid_bin": 880.2946397555218,
+    "spec_energy": 88.92654418945312,
+    "spec_flatness": 0.5161158442497253,
+    "spec_rolloff95_bin": 1705,
+    "time_energy": 0.02471267245709896
+  },
+  "gen_0_condminmax_q11": {
+    "rms": 0.15720169246196747,
+    "spec_bandwidth_bin": 524.0823393925945,
+    "spec_centroid_bin": 880.3236662159383,
+    "spec_energy": 88.92543029785156,
+    "spec_flatness": 0.5156381130218506,
+    "spec_rolloff95_bin": 1705,
+    "time_energy": 0.024712372571229935
+  },
+  "gen_0_condminmax_q4": {
+    "rms": 0.1620919108390808,
+    "spec_bandwidth_bin": 526.7050435609945,
+    "spec_centroid_bin": 877.5074328962506,
+    "spec_energy": 94.5478744506836,
+    "spec_flatness": 0.5272133350372314,
+    "spec_rolloff95_bin": 1712,
+    "time_energy": 0.026273785158991814
+  },
+  "gen_0_q11": {
+    "rms": 0.25268515944480896,
+    "spec_bandwidth_bin": 524.0823702367032,
+    "spec_centroid_bin": 880.3237363237762,
+    "spec_energy": 229.75819396972656,
+    "spec_flatness": 0.5145664811134338,
+    "spec_rolloff95_bin": 1705,
+    "time_energy": 0.0638497918844223
+  },
+  "gen_0_q4": {
+    "rms": 0.26054564118385315,
+    "spec_bandwidth_bin": 526.7050561195795,
+    "spec_centroid_bin": 877.5074741379095,
+    "spec_energy": 244.2849578857422,
+    "spec_flatness": 0.5252808332443237,
+    "spec_rolloff95_bin": 1712,
+    "time_energy": 0.06788403540849686
+  },
+  "raw": {
+    "rms": 0.3000457286834717,
+    "spec_bandwidth_bin": 95.33332698081315,
+    "spec_centroid_bin": 105.86694316754505,
+    "spec_energy": 323.91912841796875,
+    "spec_flatness": 0.01714247837662697,
+    "spec_rolloff95_bin": 242,
+    "time_energy": 0.09002744406461716
+  },
+  "target_11bit": {
+    "rms": 0.3000457286834717,
+    "spec_bandwidth_bin": 95.33332698081315,
+    "spec_centroid_bin": 105.86694316754505,
+    "spec_energy": 323.91912841796875,
+    "spec_flatness": 0.01714247837662697,
+    "spec_rolloff95_bin": 242,
+    "time_energy": 0.09002744406461716
+  }
+}

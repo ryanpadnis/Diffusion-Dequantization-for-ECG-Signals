@@ -17,6 +17,57 @@ from data.preprocess.transform import get_transform, AVAILABLE_TRANSFORMS
 from data.preprocess.quantize import UniformQuantizer, compute_range_from_tensor
 
 
+def _per_sample_symmetric_peak(signals_time: torch.Tensor, *, lower_pct: float, upper_pct: float) -> torch.Tensor:
+    """Compute per-sample symmetric peak for time-domain quantization.
+
+    Returns peak per sample with shape [N, 1] suitable for broadcasting.
+    Uses quantiles when lower/upper pct are not [0, 100].
+    """
+    x = signals_time
+    if x.ndim != 2:
+        x = x.view(x.shape[0], -1)
+
+    if lower_pct <= 0.0 and upper_pct >= 100.0:
+        lo = x.amin(dim=1)
+        hi = x.amax(dim=1)
+    else:
+        q_lo = float(lower_pct) / 100.0
+        q_hi = float(upper_pct) / 100.0
+        # torch.quantile supports dim; this is much faster than a Python loop.
+        lo = torch.quantile(x, torch.tensor(q_lo, device=x.device), dim=1)
+        hi = torch.quantile(x, torch.tensor(q_hi, device=x.device), dim=1)
+
+    peak = torch.maximum(lo.abs(), hi.abs())
+    # avoid zero range
+    peak = torch.where(peak <= 0, x.abs().amax(dim=1), peak)
+    peak = torch.where(peak <= 0, torch.ones_like(peak), peak)
+    return peak.view(-1, 1)
+
+
+def _uniform_quantize_per_sample(signals_time: torch.Tensor, *, bits: int, peak: torch.Tensor) -> torch.Tensor:
+    """Uniformly quantize each sample using its own symmetric range [-peak_i, peak_i].
+
+    Returns quantized float values at bin centers (like UniformQuantizer.quantize).
+    """
+    levels = float(2 ** int(bits))
+    # step: (range_max - range_min) / levels = (2*peak)/levels
+    step = (2.0 * peak) / levels  # [N,1]
+    step = torch.where(step.abs() < 1e-12, torch.ones_like(step), step)
+
+    # Clip and compute indices
+    x = signals_time
+    if x.ndim != 2:
+        x = x.view(x.shape[0], -1)
+
+    x_clip = torch.clamp(x, -peak, peak)
+    # indices = floor((x - (-peak)) / step) = floor((x + peak)/step)
+    idx = torch.floor((x_clip + peak) / step)
+    idx = torch.clamp(idx, 0, levels - 1)
+    # decode to centers: idx*step + (-peak) + 0.5*step
+    q = idx * step - peak + (0.5 * step)
+    return q.view_as(signals_time)
+
+
 def _resolve_torch_dtype(config: dict, device: str) -> torch.dtype:
     dtype_val = config.get('torch_dtype', 'float32')
     if isinstance(dtype_val, torch.dtype):
@@ -111,8 +162,20 @@ def create_time_quantizer(config: dict, signals_time: torch.Tensor, bits: int) -
 
     lo, hi = compute_range_from_tensor(signals_time, lower_pct, upper_pct)
     peak = max(abs(lo), abs(hi))
+    if peak <= 0:
+        peak = float(signals_time.detach().abs().max().item())
+    if peak <= 0:
+        peak = 1.0
+
     q = UniformQuantizer(bits=bits, range_min=-peak, range_max=peak)
-    q._meta = {'lower_pct': lower_pct, 'upper_pct': upper_pct, 'symmetric': True}
+    q._meta = {
+        'lower_pct': lower_pct,
+        'upper_pct': upper_pct,
+        'symmetric': True,
+        'lo': float(lo),
+        'hi': float(hi),
+        'peak': float(peak),
+    }
     return q
 
 
@@ -147,6 +210,11 @@ def process_data_before_training(config:dict):
     # Initialize to satisfy control flow when force_preprocess is set.
     cond_data = None
     real_data = None
+
+    # Always define these so normalizer metadata construction is safe even when
+    # we load already-preprocessed tensors (e.g. from S3) and never build time-domain quantizers.
+    cond_time_quantizer = None
+    real_time_quantizer = None
 
     def _extract_signals(loaded):
         # Mirror load_data() behavior but for already-loaded objects.
@@ -314,8 +382,11 @@ def process_data_before_training(config:dict):
                 # to avoid requiring raw_data_path on remote clusters.
                 pass
         except Exception:
-            print('[train_diffuser] Warning: could not validate existing holdout metadata; forcing preprocess.')
-            force_preprocess = True
+            if s3_data_uri is None:
+                print('[train_diffuser] Warning: could not validate existing holdout metadata; forcing preprocess.')
+                force_preprocess = True
+            else:
+                print('[train_diffuser] Warning: could not validate existing holdout metadata for S3 run; continuing without forcing preprocess.')
 
     if (not force_preprocess) and s3_data_uri is not None:
         # Try S3 first.
@@ -325,6 +396,25 @@ def process_data_before_training(config:dict):
             cond_loaded = _s3_get_torch(cond_data_s3)
             print(f"  - Real data (16-bit): {real_data_s3}")
             real_loaded = _s3_get_torch(real_data_s3)
+
+            # Best-effort: load normalizer metadata too for debugging consistency.
+            try:
+                import pickle as _pickle
+                norm_bytes = _s3_get_bytes(normalizer_s3)
+                norm = _pickle.loads(norm_bytes)
+                print(f"[train_diffuser] Loaded normalizer_params.pkl from S3: {normalizer_s3}")
+                for k in [
+                    'time_quantization_mode',
+                    'time_quant_clip_lower',
+                    'time_quant_clip_upper',
+                    'cond_bits',
+                    'real_bits',
+                    'mag_normalization',
+                ]:
+                    if k in norm:
+                        print(f"  - {k}: {norm.get(k)}")
+            except Exception as e:
+                print(f"[train_diffuser] Warning: could not load/parse normalizer_params.pkl from S3 (non-fatal): {e}")
 
             cond_data = _extract_signals(cond_loaded).to(device)
             real_data = _extract_signals(real_loaded).to(device)
@@ -341,9 +431,12 @@ def process_data_before_training(config:dict):
             print(f"[train_diffuser] Real data shape: {real_data.shape} (samples: {real_data.shape[0]})")
             print(f"[train_diffuser] Expected batches with batch_size=16: {cond_data.shape[0] // 16}")
         except FileNotFoundError:
-            print("[train_diffuser] Preprocessed data not found in S3; will preprocess from raw.")
-            cond_data = None
-            real_data = None
+            raise ValueError(
+                "Preprocessed data not found in S3. This run is configured for S3-only data loading. "
+                "Prepare and upload tensors first (use --prepare-s3-data or --prepare-s3-data-if-missing), "
+                "or set force_preprocess=True only in an environment where raw_data_path exists. "
+                f"Missing one or more of: {cond_data_s3}, {real_data_s3}"
+            )
 
     if cond_data is not None and real_data is not None:
         pass
@@ -397,14 +490,72 @@ def process_data_before_training(config:dict):
             # Replace signals used for preprocessing/training.
             signals = train_signals
 
-        # Quantize in TIME DOMAIN first to create degraded (4-bit) and target (16-bit) waveforms.
-        print(f"[train_diffuser] Time-domain quantization: {cond_bits}-bit condition, {real_bits}-bit target")
-        cond_time_quantizer = create_time_quantizer(config, signals, bits=cond_bits)
-        real_time_quantizer = create_time_quantizer(config, signals, bits=real_bits)
+        # Quantize in TIME DOMAIN first to create degraded (4-bit) and target waveforms.
+        # If raw is already at `real_bits`, we skip quantizing the target waveform.
+        assume_raw_is_real_bits = bool(config.get('assume_raw_is_real_bits', False))
+        if assume_raw_is_real_bits:
+            print(
+                f"[train_diffuser] Time-domain: quantize condition to {cond_bits}-bit; "
+                f"target uses raw (assumed {real_bits}-bit)"
+            )
+        else:
+            print(f"[train_diffuser] Time-domain quantization: {cond_bits}-bit condition, {real_bits}-bit target")
+        time_quant_mode = str(config.get('time_quantization_mode') or 'global').strip().lower()
+        if time_quant_mode not in {'per_sample', 'global'}:
+            print(f"[train_diffuser] Warning: unknown time_quantization_mode={time_quant_mode!r}; defaulting to per_sample")
+            time_quant_mode = 'per_sample'
 
-        # Build simulated quantized waveforms (values lie on discrete quantizer levels)
-        cond_time = cond_time_quantizer.quantize(signals)
-        real_time = real_time_quantizer.quantize(signals)
+        lower_pct = float(config.get('quantile_clip_lower', 0.0))
+        upper_pct = float(config.get('quantile_clip_upper', 100.0))
+
+        if time_quant_mode == 'per_sample':
+            print(f"[train_diffuser] Time-domain quantization mode: per_sample (pct={lower_pct:g}-{upper_pct:g})")
+            peak = _per_sample_symmetric_peak(signals, lower_pct=lower_pct, upper_pct=upper_pct)  # [N,1]
+            cond_time = _uniform_quantize_per_sample(signals, bits=int(cond_bits), peak=peak)
+            real_time = signals if assume_raw_is_real_bits else _uniform_quantize_per_sample(signals, bits=int(real_bits), peak=peak)
+
+            # For debug printing we still build a representative quantizer from sample_0 only.
+            try:
+                from diffusion.utils.quant_debug import summarize_tensor, summarize_uniform_quantizer, summarize_quantization_usage
+
+                peak0 = float(peak[0].item())
+                q0 = UniformQuantizer(bits=int(cond_bits), range_min=-peak0, range_max=peak0)
+                q0._meta = {'source': 'per_sample', 'sample': 0, 'peak': peak0, 'lower_pct': lower_pct, 'upper_pct': upper_pct}
+                print("[train_diffuser] Time-domain quant diagnostics (sample_0)")
+                summarize_tensor(signals[:1], "raw_time(sample_0)")
+                summarize_uniform_quantizer(q0, f"cond_time_q{int(cond_bits)}(sample_0)")
+                summarize_quantization_usage(signals[:1], q0, f"cond_time_q{int(cond_bits)}_usage(sample_0)")
+            except Exception as e:
+                print(f"[train_diffuser] Quant diagnostics failed (non-fatal): {e}")
+
+            # No single global range exists in this mode.
+            cond_time_quantizer = None
+            real_time_quantizer = None
+        else:
+            print(f"[train_diffuser] Time-domain quantization mode: global (pct={lower_pct:g}-{upper_pct:g})")
+            cond_time_quantizer = create_time_quantizer(config, signals, bits=cond_bits)
+            real_time_quantizer = create_time_quantizer(config, signals, bits=real_bits)
+
+            # Debug prints for quantization consistency.
+            try:
+                from diffusion.utils.quant_debug import (
+                    summarize_tensor,
+                    summarize_uniform_quantizer,
+                    summarize_quantization_usage,
+                )
+
+                print("[train_diffuser] Time-domain quantization diagnostics (train split)")
+                summarize_tensor(signals[:1], "raw_time(sample_0)")
+                summarize_uniform_quantizer(cond_time_quantizer, f"cond_time_q{int(cond_bits)}")
+                summarize_quantization_usage(signals[:1], cond_time_quantizer, f"cond_time_q{int(cond_bits)}_usage(sample_0)")
+                summarize_uniform_quantizer(real_time_quantizer, f"real_time_q{int(real_bits)}")
+                summarize_quantization_usage(signals[:1], real_time_quantizer, f"real_time_q{int(real_bits)}_usage(sample_0)")
+            except Exception as e:
+                print(f"[train_diffuser] Quant diagnostics failed (non-fatal): {e}")
+
+            # Build simulated waveforms
+            cond_time = cond_time_quantizer.quantize(signals)
+            real_time = signals if assume_raw_is_real_bits else real_time_quantizer.quantize(signals)
 
         # Apply transform (STFT) to both waveforms to get matrices (spectrogram magnitudes)
         transform_cond = create_transform(config, device)
@@ -449,6 +600,12 @@ def process_data_before_training(config:dict):
             torch.save({'signals': real_data.to(torch.float32).cpu()}, real_data_path)
             print(f"[train_diffuser] Saved both datasets")
     else:
+        if s3_data_uri is not None and not force_preprocess:
+            raise ValueError(
+                "Raw data is not available locally, and this run is configured to load preprocessed tensors from S3. "
+                "Prepare and upload tensors first (use --prepare-s3-data), then rerun training. "
+                f"raw_data_path={raw_data_path}"
+            )
         raise ValueError(f"Raw data not found at {raw_data_path}")
     
     print(f"[train_diffuser] Computing magnitude ranges (full dataset)")
@@ -511,12 +668,13 @@ def process_data_before_training(config:dict):
     print(f"  - Normalized real range:      [{real_data.min():.4f}, {real_data.max():.4f}]")
     
     normalizer_params = {
-        'cond_time_range_min': (cond_time_quantizer.range_min if 'cond_time_quantizer' in locals() else None),
-        'cond_time_range_max': (cond_time_quantizer.range_max if 'cond_time_quantizer' in locals() else None),
-        'real_time_range_min': (real_time_quantizer.range_min if 'real_time_quantizer' in locals() else None),
-        'real_time_range_max': (real_time_quantizer.range_max if 'real_time_quantizer' in locals() else None),
-        'time_quant_clip_lower': (getattr(cond_time_quantizer, '_meta', {}).get('lower_pct') if 'cond_time_quantizer' in locals() else None),
-        'time_quant_clip_upper': (getattr(cond_time_quantizer, '_meta', {}).get('upper_pct') if 'cond_time_quantizer' in locals() else None),
+        'time_quantization_mode': str(config.get('time_quantization_mode') or 'global'),
+        'cond_time_range_min': (cond_time_quantizer.range_min if cond_time_quantizer is not None else None),
+        'cond_time_range_max': (cond_time_quantizer.range_max if cond_time_quantizer is not None else None),
+        'real_time_range_min': (real_time_quantizer.range_min if real_time_quantizer is not None else None),
+        'real_time_range_max': (real_time_quantizer.range_max if real_time_quantizer is not None else None),
+        'time_quant_clip_lower': (getattr(cond_time_quantizer, '_meta', {}).get('lower_pct') if cond_time_quantizer is not None else None),
+        'time_quant_clip_upper': (getattr(cond_time_quantizer, '_meta', {}).get('upper_pct') if cond_time_quantizer is not None else None),
         'cond_mag_min': cond_mag_min,
         'cond_mag_max': cond_mag_max,
         'real_mag_min': real_mag_min,
@@ -529,6 +687,19 @@ def process_data_before_training(config:dict):
         'transform_type': transform_type,
         'pipeline_config': config.get('pipeline_config'),
     }
+
+    # Always save a per-run copy of normalizer_params locally (inside results/data)
+    # so samplers/analysis can remain consistent even when the canonical copy lives in S3.
+    try:
+        if data_dir is not None:
+            data_dir.mkdir(parents=True, exist_ok=True)
+            normalizer_path = data_dir / 'normalizer_params.pkl'
+            with open(normalizer_path, 'wb') as f:
+                pickle.dump(normalizer_params, f)
+            print(f"[train_diffuser] Normalizer params saved to: {normalizer_path}")
+    except Exception as e:
+        print(f"[train_diffuser] Warning: could not save local normalizer_params.pkl (non-fatal): {e}")
+
     if s3_data_uri is not None:
         from diffusion.aws.s3_io import s3_object_exists
 
@@ -541,11 +712,8 @@ def process_data_before_training(config:dict):
             _s3_put_bytes(buf.getvalue(), normalizer_s3)
             print(f"[train_diffuser] Normalizer params uploaded to: {normalizer_s3}")
     else:
-        assert data_dir is not None
-        normalizer_path = data_dir / 'normalizer_params.pkl'
-        with open(normalizer_path, 'wb') as f:
-            pickle.dump(normalizer_params, f)
-        print(f"[train_diffuser] Normalizer params saved to: {normalizer_path}")
+        # In non-S3 mode we already saved above; keep behavior but don't double-print.
+        pass
     return cond_data, real_data, checkpoint_dir, samples_dir, logs_dir, epochs
 
 
@@ -561,13 +729,9 @@ def train_diffuser(real_data,cond_data, checkpoint_dir, samples_dir, logs_dir, e
     """
 
     # Print a definitive version stamp to check for stale code
-    config_version = getattr(config, '__version__', 'N/A')
+    # Note: `config` is a dict (from DiffusionConfig.to_dict())
+    config_version = config.get("__version__", "N/A")
     print(f"[train_diffuser] *** CONFIG VERSION: {config_version} ***")
-
-    # S3 data paths
-    s3_data_prefix = f"data/{config.version}"
-    s3_cond_path = f"{s3_data_prefix}/train_cond_{config.quant_type}_{config.quant_bits}bit.pt"
-    s3_real_path = f"{s3_data_prefix}/train_data_{config.quant_type}_{config.data_bits}bit.pt"
 
     # Build diffuser and train
     diffuser, optimizer, lr_scheduler = build_diffuser(config)
@@ -612,6 +776,7 @@ def train_diffuser(real_data,cond_data, checkpoint_dir, samples_dir, logs_dir, e
         epochs=epochs,
         batch_size=batch_size,
         num_workers=config.get('num_workers', 0),
+        resume_from=config.get('resume_from'),
     )
     print(f"[train_diffuser] Outputs saved to:")
     print(f"  - Checkpoints: {checkpoint_dir}")

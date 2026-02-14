@@ -7,15 +7,15 @@ This is a convenience wrapper around deleting the S3 prefixes this project uses:
 Examples:
   # Dry-run (prints object counts and bytes)
   uv run python -m diffusion.aws.cleanup_project_s3 \
-    --s3 s3://YOUR_BUCKET/ee269project --region us-east-1 --what data
+        --region us-east-1 --what data
 
   # Actually delete the cached preprocessed dataset
   uv run python -m diffusion.aws.cleanup_project_s3 \
-    --s3 s3://YOUR_BUCKET/ee269project --region us-east-1 --what data --yes
+        --region us-east-1 --what data --yes
 
   # Delete both dataset cache and run artifacts
   uv run python -m diffusion.aws.cleanup_project_s3 \
-    --s3 s3://YOUR_BUCKET/ee269project --region us-east-1 --what all --yes
+        --region us-east-1 --what all --yes
 
 Notes:
 - Destructive. Defaults to dry-run.
@@ -45,8 +45,11 @@ def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(add_help=True)
     p.add_argument(
         "--s3",
-        required=True,
-        help="Base S3 URI prefix, e.g. s3://bucket/ee269project",
+        default="s3://anyscale-production-data-cld-uvdckbb6ukmk9fu8g3nxxudemt/ee269project",
+        help=(
+            "Base S3 URI prefix, e.g. s3://bucket/ee269project "
+            "(default: anyscale-production-data-cld-uvdckbb6ukmk9fu8g3nxxudemt/ee269project)"
+        ),
     )
     p.add_argument("--region", default="us-east-1", help="AWS region (default: us-east-1)")
     p.add_argument("--version", default="V1", help="Dataset/results version (default: V1)")

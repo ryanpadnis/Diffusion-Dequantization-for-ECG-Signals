@@ -13,8 +13,8 @@ class DiffusionConfig:
     __version__ = "2026-02-05-v4"  # Hardcoded version to debug stale code
 
     # Run metadata
-    version = "V1" #change this between runs 
-    run_name = ""
+    version = "V4" #change this between runs 
+    run_name = ""  # Descriptive name for this run (used in results dir)
 
     # Immutable project paths
     diffusion_root = settings.DIFFUSION_ROOT
@@ -33,21 +33,31 @@ class DiffusionConfig:
     # Diffusion Model Parameters
     unet_type = "conditional"
     scheduler_type = "ddpm"
-    num_noising_steps = 100
+    num_noising_steps = 250
     image_size = (128, 64)  # (height, width)
     in_channels = 1
     out_channels = 1
 
     # Conditioning
     bit_size = 4  # Condition bit depth
-    real_bit_size = 16  # Real data bit depth
+    real_bit_size = 11  # Real data bit depth
+
+    # If True, treat `raw_data_path` waveforms as already quantized to `real_bit_size`.
+    # Training/analysis then use the raw waveform as the target time-domain signal.
+    # (Conditioning still uses `bit_size` quantization.)
+    assume_raw_is_real_bits = True
     quantizer_type = "uniform"
     transform_type = "stft"
 
     # Quantizer range computation (percentile clipping to avoid outliers dominating range)
     # Example: upper=99.5 means values above the 99.5th percentile clip to range_max.
     quantile_clip_lower = 0.0
-    quantile_clip_upper = 99.5
+    quantile_clip_upper = 100.0
+
+    # Time-domain quantization range policy
+    # - 'per_sample': each waveform gets its own symmetric range (recommended to avoid global range bias)
+    # - 'global': a single symmetric range computed from the training split
+    time_quantization_mode = 'per_sample'
 
     force_preprocess = False  # Set to True or use --force-preprocess flag to regenerate from raw dataset
     
@@ -87,11 +97,7 @@ class DiffusionConfig:
     
     # Optimizer
     optimizer_type = 'adamw'  # 'adamw', 'adam', or 'sgd'
-    adam_beta1 = 0.95
-    adam_beta2 = 0.999
-    adam_weight_decay = 1e-6
-    adam_epsilon = 1e-8
-    sgd_momentum = 0.9
+
     
     # LR Scheduler
     lr_warmup_steps = None  # None = warmup for first epoch automatically
@@ -115,9 +121,11 @@ class DiffusionConfig:
     @classmethod
     def to_dict(cls) -> dict:
         """Convert config to dictionary."""
-        return {
+        out = {
             key: getattr(cls, key)
             for key in dir(cls)
             if not key.startswith('_') and not callable(getattr(cls, key))
         }
+        out["__version__"] = getattr(cls, "__version__", "")
+        return out
 

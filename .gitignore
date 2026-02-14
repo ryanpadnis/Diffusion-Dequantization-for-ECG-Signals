@@ -264,6 +264,46 @@ diffusion/**/checkpoints/
 diffusion/**/samples/
 diffusion/**/logs/
 
+# Minimal un-ignore chain so ONLY one run's samples can be committed.
+!diffusion/results/
+!diffusion/results/V4/
+!diffusion/results/V4/20260213_202346/
+
+# Opt-in: commit sample artifacts for ONE specific run (keep this narrow).
+# Edit these two lines if you want to share a different run.
+!diffusion/results/V4/20260213_202346/samples/
+!diffusion/results/V4/20260213_202346/samples/**
+
+# Override general artifact ignores within that run's samples
+!diffusion/results/V4/20260213_202346/samples/**/*.pt
+!diffusion/results/V4/20260213_202346/samples/**/*.png
+!diffusion/results/V4/20260213_202346/samples/**/*.jpg
+!diffusion/results/V4/20260213_202346/samples/**/*.jpeg
+!diffusion/results/V4/20260213_202346/samples/**/*.npy
+!diffusion/results/V4/20260213_202346/samples/**/*.npz
+!diffusion/results/V4/20260213_202346/samples/**/*.pkl
+!diffusion/results/V4/20260213_202346/samples/**/*.pickle
+
+# Opt-in: commit curated sample artifacts
+#
+# Workflow:
+#   mkdir -p diffusion/commit_samples/<run_id>/
+#   cp -R diffusion/results/<V?>/<run_id>/samples/ddpm/sample_0 diffusion/commit_samples/<run_id>/
+#   git add diffusion/commit_samples/<run_id>/...
+diffusion/commit_samples/
+!diffusion/commit_samples/
+!diffusion/commit_samples/**
+
+# Override general artifact ignores within commit_samples
+!diffusion/commit_samples/**/*.pt
+!diffusion/commit_samples/**/*.png
+!diffusion/commit_samples/**/*.jpg
+!diffusion/commit_samples/**/*.jpeg
+!diffusion/commit_samples/**/*.npy
+!diffusion/commit_samples/**/*.npz
+!diffusion/commit_samples/**/*.pkl
+!diffusion/commit_samples/**/*.pickle
+
 # Keep lockfiles and project metadata tracked
 !uv.lock
 !pyproject.toml
