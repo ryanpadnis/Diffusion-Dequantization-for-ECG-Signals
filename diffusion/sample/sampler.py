@@ -126,9 +126,18 @@ class DiffusionSampler:
         transform = get_transform(transform_type, **pipeline_config, device=self.device)
         mag = transform.apply(wave_4bit)
 
-        self._last_phase = transform.phase.detach().clone()
+        phase = getattr(transform, 'phase', None)
+        if phase is None:
+            self._last_phase = None
+        else:
+            self._last_phase = phase.detach().clone()
         self._last_input_length = int(wave_4bit.shape[-1])
 
+        if mag.ndim == 2:
+            raise ValueError(
+                f"Transform '{transform_type}' returned 2D output {tuple(mag.shape)}; "
+                "configure the transform to return a 2D grid (e.g. Haar out_shape=(H,W))."
+            )
         if mag.ndim == 3:
             mag = mag.unsqueeze(1)  # [B, F, T] -> [B, 1, F, T]
 
@@ -181,7 +190,7 @@ class DiffusionSampler:
     def postprocess_generated(
         self,
         generated: torch.Tensor,
-        condition_phase: torch.Tensor,
+        condition_phase: Optional[torch.Tensor],
         params: dict,
         *,
         cond_min: torch.Tensor | None = None,
@@ -190,12 +199,16 @@ class DiffusionSampler:
         return_denormalized: bool = False,
         rescale_to_unit_range: bool = True,
     ) -> torch.Tensor:
-        """Denormalize generated magnitude and invert transform using condition phase.
+        """Denormalize generated transform coefficients and invert to time domain.
 
         If cond_min/cond_denom are provided, uses per-sample inversion matching training.
         Otherwise falls back to global range inversion (legacy behavior).
         """
         from data.preprocess.transform import get_transform
+
+        pipeline_config = params['pipeline_config'].copy()
+        transform_type = pipeline_config.get('transform', 'stft')
+        magnitude_only = str(transform_type).lower() in {'stft', 'dft'}
 
         # Inference may run in bf16/fp16. Convert to float32 for stable inversion.
         generated = generated.to(torch.float32)
@@ -211,23 +224,24 @@ class DiffusionSampler:
             cond_denom = cond_denom.to(torch.float32)
             denormalized = (generated + 1.0) / 2.0
             denormalized = denormalized * cond_denom + cond_min
-            # Magnitudes must be non-negative; also cap to the conditioning max.
-            cond_max = cond_min + cond_denom
-            denormalized = torch.clamp(denormalized, min=0.0)
-            denormalized = torch.minimum(denormalized, cond_max)
+            if magnitude_only:
+                # Magnitudes must be non-negative; also cap to the conditioning max.
+                cond_max = cond_min + cond_denom
+                denormalized = torch.clamp(denormalized, min=0.0)
+                denormalized = torch.minimum(denormalized, cond_max)
         else:
             rmin = float(params['cond_mag_min'])
             rmax = float(params['cond_mag_max'])
             denormalized = (generated + 1.0) / 2.0
             denormalized = denormalized * (float(rmax) - float(rmin)) + float(rmin)
-            denormalized = torch.clamp(denormalized, min=0.0, max=max(float(rmax), 0.0))
+            if magnitude_only:
+                denormalized = torch.clamp(denormalized, min=0.0, max=max(float(rmax), 0.0))
 
         
         if denormalized.ndim == 4 and denormalized.shape[1] == 1:
             denormalized = denormalized.squeeze(1)
         
-        # Inverse STFT to time domain
-        pipeline_config = params['pipeline_config'].copy()
+        # Inverse transform back to time domain
         transform_type = pipeline_config.pop('transform', 'stft')
         
         transform = get_transform(
@@ -235,21 +249,25 @@ class DiffusionSampler:
             **pipeline_config,
             device=self.device
         )
-        
-        phase = condition_phase
-        if phase.ndim == 4 and phase.shape[1] == 1:
-            phase = phase.squeeze(1)
-        transform.phase = phase.to(self.device)
-        
-        if transform.phase.shape != denormalized.shape:
-            print(f"  [Warning] Phase shape {transform.phase.shape} != denormalized {denormalized.shape}")
-            if transform.phase.shape[-1] > denormalized.shape[-1]:
-                transform.phase = transform.phase[:, :, :denormalized.shape[-1]]
-            elif transform.phase.shape[-1] < denormalized.shape[-1]:
-                pad_size = denormalized.shape[-1] - transform.phase.shape[-1]
-                transform.phase = torch.nn.functional.pad(
-                    transform.phase, (0, pad_size), mode='constant', value=0
-                )
+
+        # Some transforms (e.g. STFT) require phase/state to invert.
+        if hasattr(transform, 'phase'):
+            if condition_phase is None:
+                raise ValueError(f"Transform '{transform_type}' requires condition_phase for inversion")
+            phase = condition_phase
+            if phase.ndim == 4 and phase.shape[1] == 1:
+                phase = phase.squeeze(1)
+            transform.phase = phase.to(self.device)
+
+            if transform.phase.shape != denormalized.shape:
+                print(f"  [Warning] Phase shape {transform.phase.shape} != denormalized {denormalized.shape}")
+                if transform.phase.shape[-1] > denormalized.shape[-1]:
+                    transform.phase = transform.phase[:, :, :denormalized.shape[-1]]
+                elif transform.phase.shape[-1] < denormalized.shape[-1]:
+                    pad_size = denormalized.shape[-1] - transform.phase.shape[-1]
+                    transform.phase = torch.nn.functional.pad(
+                        transform.phase, (0, pad_size), mode='constant', value=0
+                    )
         
         # For center=True, the STFT frame count is not a direct (T, hop, n_fft)
         # inversion of the original time length due to padding.
@@ -316,25 +334,31 @@ class DiffusionSampler:
         def _save_snapshot(step_idx: int, timestep, image_batch: torch.Tensor) -> None:
             if progress_dir is None:
                 return
-            if progress_condition_phase is None or progress_params is None:
+            if progress_params is None:
                 return
 
             # Save spectrograms as a single tensor: [B, 1, H, W]
             specs_norm = image_batch.detach().to('cpu').to(torch.float32)
 
             # Denormalize using per-sample normalization when available.
+            snap_pipeline_config = (progress_params.get('pipeline_config') or {}).copy()
+            snap_transform_type = snap_pipeline_config.get('transform', 'stft')
+            snap_magnitude_only = str(snap_transform_type).lower() in {'stft', 'dft'}
+
             if ('cond_min' in progress_params) and ('cond_denom' in progress_params):
                 cmin = progress_params['cond_min'].to(torch.float32)
                 cden = progress_params['cond_denom'].to(torch.float32)
                 specs_denorm = (specs_norm + 1.0) / 2.0
                 specs_denorm = specs_denorm * cden + cmin
-                specs_denorm = torch.clamp(specs_denorm, min=0.0)
+                if snap_magnitude_only:
+                    specs_denorm = torch.clamp(specs_denorm, min=0.0)
             else:
                 rmin = float(progress_params.get('cond_mag_min', 0.0))
                 rmax = float(progress_params.get('cond_mag_max', 1.0))
                 specs_denorm = (specs_norm + 1.0) / 2.0
                 specs_denorm = specs_denorm * (float(rmax) - float(rmin)) + float(rmin)
-                specs_denorm = torch.clamp(specs_denorm, min=0.0)
+                if snap_magnitude_only:
+                    specs_denorm = torch.clamp(specs_denorm, min=0.0)
 
             # Also save phase-based inversion for each trajectory.
             # (Loop is fine; this is debug/analysis output.)
@@ -489,7 +513,10 @@ class DiffusionSampler:
                 
                 batch_cond_specs.append(cond_spec)
                 # self._last_phase is set by preprocess_condition side-effect
-                batch_phases.append(self._last_phase.clone())
+                if self._last_phase is None:
+                    batch_phases.append(None)
+                else:
+                    batch_phases.append(self._last_phase.clone())
                 batch_cond_mins.append(getattr(self, '_last_cond_min').clone())
                 batch_cond_denoms.append(getattr(self, '_last_cond_denom').clone())
                 batch_input_lengths.append(int(getattr(self, '_last_input_length')))

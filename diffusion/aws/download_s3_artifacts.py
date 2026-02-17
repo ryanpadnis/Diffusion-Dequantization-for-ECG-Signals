@@ -15,6 +15,7 @@ Usage Examples (copy/paste safe):
 
     # Download essentials only (fast - best for most cases)
     uv run python -m diffusion.aws.download_s3_artifacts --version V4 --run-id 20260213_202346 --best-only
+    uv run diffusion/aws/download_s3_artifacts.py --version V1/Sigmoid --run-id 20260216_161119 
 
     # Download logs and samples only (skip all checkpoints)
     uv run python -m diffusion.aws.download_s3_artifacts --version V4 --run-id 20260213_202346 --no-checkpoints

@@ -127,6 +127,8 @@ def create_transform(transform_config: dict, device: str):
     pipeline_config = transform_config.get('pipeline_config', {})
     transform_name = pipeline_config.get('transform', 'stft')
 
+    extra_kwargs = {k: v for k, v in pipeline_config.items() if k != 'transform'}
+
     if transform_name == 'stft':
         return get_transform(
             'stft',
@@ -138,7 +140,7 @@ def create_transform(transform_config: dict, device: str):
             device=device_obj,
         )
     else:
-        return get_transform(transform_name, device=device_obj)
+        return get_transform(transform_name, **extra_kwargs, device=device_obj)
 
 
 def create_quantizer(config: dict, signals: torch.Tensor) -> UniformQuantizer:

@@ -83,7 +83,7 @@ class ConditionalDiffuser(nn.Module):
     def _build_scheduler(self, scheduler_type: str, config: Dict[str, Any]):
         """Build scheduler (extensible for new schedulers)."""
         num_timesteps = config.get('num_noising_steps', 1000)
-        beta_schedule = config.get('noise_schedule', 'linear')
+        beta_schedule = config.get('noise_schedule_type', None) or config.get('beta_type', 'linear')
         
         if scheduler_type == 'ddpm':
             return DDPMScheduler(

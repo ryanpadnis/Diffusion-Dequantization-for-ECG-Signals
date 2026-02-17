@@ -13,7 +13,7 @@ class DiffusionConfig:
     __version__ = "2026-02-05-v4"  # Hardcoded version to debug stale code
 
     # Run metadata
-    version = "V4" #change this between runs 
+    version = "V1/haarsigmoid"  # change this between runs
     run_name = ""  # Descriptive name for this run (used in results dir)
 
     # Immutable project paths
@@ -33,8 +33,12 @@ class DiffusionConfig:
     # Diffusion Model Parameters
     unet_type = "conditional"
     scheduler_type = "ddpm"
-    num_noising_steps = 250
-    image_size = (128, 64)  # (height, width)
+    beta_type = "sigmoid"  # 'linear', 'cosine', or 'sigmoid'
+    # Alias for clarity: diffusers calls this the "beta_schedule".
+    # Keep beta_type for backwards compatibility.
+    noise_schedule_type = "sigmoid"  # if set, overrides beta_type
+    num_noising_steps = 1000
+    image_size = (64, 64)  # Haar uses H*W coeff grid; 64*64=4096 for 3600-sample chunks
     in_channels = 1
     out_channels = 1
 
@@ -47,7 +51,7 @@ class DiffusionConfig:
     # (Conditioning still uses `bit_size` quantization.)
     assume_raw_is_real_bits = True
     quantizer_type = "uniform"
-    transform_type = "stft"
+    transform_type = "haar"
 
     # Quantizer range computation (percentile clipping to avoid outliers dominating range)
     # Example: upper=99.5 means values above the 99.5th percentile clip to range_max.
@@ -64,21 +68,16 @@ class DiffusionConfig:
     # Data pipeline config
     pipeline_config = {
         "transform": transform_type,
-        # Natural 128x64 STFT for 3600-sample chunks (no cropping):
-        # freq_bins = n_fft//2 + 1 = 128
-        # time_frames = 1 + floor(L / hop_length) = 64 when L in [3591, 3647]
-        "n_fft": 254,
-        "hop_length": 57,
-        "win_length": 254,
-        "onesided": True,
-        "center": True,
+        # Haar packs coefficients into a 2D grid for the UNet.
+        # Must satisfy H*W >= input_length; internally pads to power-of-two.
+        "out_shape": image_size,
     }
     
     # Training parameters
     learning_rate = 1e-4
-    batch_size = 16
-    num_epochs = 50
-    epochs = 50
+    batch_size = 32
+    num_epochs = 25
+    epochs = 25
     gradient_accumulation_steps = 1
     num_workers = 0
     mixed_precision = "bf16"  # Use bfloat16 for numerical stability (prevents NaN losses)
