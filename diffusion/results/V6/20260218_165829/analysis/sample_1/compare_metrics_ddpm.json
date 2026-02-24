@@ -1,0 +1,25 @@
+{
+  "sample_dir": "diffusion/results/V6/20260218_165829/samples/ddpm/sample_1",
+  "pipeline_transform": "stft",
+  "sampler_type": "ddpm",
+  "metrics": {
+    "mse_spec_mag(cond4_vs_target)": 0.2664410471916199,
+    "mse_spec_mag(generated_vs_target)": 5.773233413696289,
+    "mse_spec_log1p(cond4_vs_target)": 0.05916411429643631,
+    "mse_spec_log1p(generated_vs_target)": 0.14783921837806702,
+    "mse_time(cond4_vs_target)": 0.004283146932721138,
+    "mse_time(generated_vs_target)": 0.04826820641756058,
+    "corr_time(cond4_vs_target)": 0.9780195355415344,
+    "corr_time(generated_vs_target)": 0.8261510729789734,
+    "peak_ratio_time(cond4_vs_target)": 0.9374999824228574,
+    "peak_ratio_time(generated_vs_target)": 0.40121581368687653,
+    "rms_ratio_time(cond4_vs_target)": 1.008302803240433,
+    "rms_ratio_time(generated_vs_target)": 0.5583725465154712,
+    "mean_ratio_spec_mag(cond4_vs_target)": 1.1872618198394775,
+    "mean_ratio_spec_mag(generated_vs_target)": 0.5642871856689453,
+    "p95_ratio_spec_mag(cond4_vs_target)": 0.9744584560394287,
+    "p95_ratio_spec_mag(generated_vs_target)": 0.3514251112937927,
+    "improvement_pct_spec_mag": -2066.795797625085,
+    "improvement_pct_time": -1026.9332380081385
+  }
+}

@@ -2,6 +2,13 @@
 
 This folder contains optional helpers for syncing run artifacts to S3.
 
+## Sharing one run’s samples via GitHub
+
+If you need to commit *one specific run’s* `diffusion/results/<version>/<run-id>/samples/**` to git (for teammates/analysis), use:
+- [diffusion/aws/README_COMMIT_DIFFUSION_DATA.md](diffusion/aws/README_COMMIT_DIFFUSION_DATA.md)
+
+It covers the repo’s `.gitignore` allowlist pattern + Git LFS setup for >100MB `.pt` files.
+
 ## Your bucket
 
 This repo originally used an S3 bucket in `us-east-2` ("use2").

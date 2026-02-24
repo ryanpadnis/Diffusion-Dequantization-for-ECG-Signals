@@ -1,0 +1,182 @@
+{
+  "version": "V5",
+  "run_id": "20260218_132239",
+  "metrics": [
+    {
+      "sample_idx": 0,
+      "sampler_type": "ddpm",
+      "gen_time_key": "time_domain",
+      "mse_cond4_vs_target": 0.0035552692133933306,
+      "mse_gen0_vs_target": 0.21145042777061462,
+      "mse_gen0_maglp_vs_target": 0.017962193116545677,
+      "mag_lowpass_hz": 40.0,
+      "mag_lowpass_kind": "taper",
+      "mag_lowpass_transition_bins": 8
+    },
+    {
+      "sample_idx": 1,
+      "sampler_type": "ddpm",
+      "gen_time_key": "time_domain",
+      "mse_cond4_vs_target": 0.004283146932721138,
+      "mse_gen0_vs_target": 0.285329669713974,
+      "mse_gen0_maglp_vs_target": 0.017456188797950745,
+      "mag_lowpass_hz": 40.0,
+      "mag_lowpass_kind": "taper",
+      "mag_lowpass_transition_bins": 8
+    },
+    {
+      "sample_idx": 2,
+      "sampler_type": "ddpm",
+      "gen_time_key": "time_domain",
+      "mse_cond4_vs_target": 0.0036518224515020847,
+      "mse_gen0_vs_target": 0.19675324857234955,
+      "mse_gen0_maglp_vs_target": 0.01875552348792553,
+      "mag_lowpass_hz": 40.0,
+      "mag_lowpass_kind": "taper",
+      "mag_lowpass_transition_bins": 8
+    },
+    {
+      "sample_idx": 3,
+      "sampler_type": "ddpm",
+      "gen_time_key": "time_domain",
+      "mse_cond4_vs_target": 0.00376410991884768,
+      "mse_gen0_vs_target": 0.26189666986465454,
+      "mse_gen0_maglp_vs_target": 0.02182644233107567,
+      "mag_lowpass_hz": 40.0,
+      "mag_lowpass_kind": "taper",
+      "mag_lowpass_transition_bins": 8
+    },
+    {
+      "sample_idx": 4,
+      "sampler_type": "ddpm",
+      "gen_time_key": "time_domain",
+      "mse_cond4_vs_target": 0.004089097958058119,
+      "mse_gen0_vs_target": 0.1661994308233261,
+      "mse_gen0_maglp_vs_target": 0.020189328119158745,
+      "mag_lowpass_hz": 40.0,
+      "mag_lowpass_kind": "taper",
+      "mag_lowpass_transition_bins": 8
+    },
+    {
+      "sample_idx": 5,
+      "sampler_type": "ddpm",
+      "gen_time_key": "time_domain",
+      "mse_cond4_vs_target": 0.0037988610565662384,
+      "mse_gen0_vs_target": 0.2581510841846466,
+      "mse_gen0_maglp_vs_target": 0.03167015314102173,
+      "mag_lowpass_hz": 40.0,
+      "mag_lowpass_kind": "taper",
+      "mag_lowpass_transition_bins": 8
+    },
+    {
+      "sample_idx": 6,
+      "sampler_type": "ddpm",
+      "gen_time_key": "time_domain",
+      "mse_cond4_vs_target": 0.004394840449094772,
+      "mse_gen0_vs_target": 0.34498417377471924,
+      "mse_gen0_maglp_vs_target": 0.03398263826966286,
+      "mag_lowpass_hz": 40.0,
+      "mag_lowpass_kind": "taper",
+      "mag_lowpass_transition_bins": 8
+    },
+    {
+      "sample_idx": 7,
+      "sampler_type": "ddpm",
+      "gen_time_key": "time_domain",
+      "mse_cond4_vs_target": 0.00371940596960485,
+      "mse_gen0_vs_target": 0.24534347653388977,
+      "mse_gen0_maglp_vs_target": 0.030647559091448784,
+      "mag_lowpass_hz": 40.0,
+      "mag_lowpass_kind": "taper",
+      "mag_lowpass_transition_bins": 8
+    },
+    {
+      "sample_idx": 8,
+      "sampler_type": "ddpm",
+      "gen_time_key": "time_domain",
+      "mse_cond4_vs_target": 0.010369911789894104,
+      "mse_gen0_vs_target": 1.1129170656204224,
+      "mse_gen0_maglp_vs_target": 0.41441869735717773,
+      "mag_lowpass_hz": 40.0,
+      "mag_lowpass_kind": "taper",
+      "mag_lowpass_transition_bins": 8
+    },
+    {
+      "sample_idx": 9,
+      "sampler_type": "ddpm",
+      "gen_time_key": "time_domain",
+      "mse_cond4_vs_target": 0.004440841265022755,
+      "mse_gen0_vs_target": 0.23447668552398682,
+      "mse_gen0_maglp_vs_target": 0.027562716975808144,
+      "mag_lowpass_hz": 40.0,
+      "mag_lowpass_kind": "taper",
+      "mag_lowpass_transition_bins": 8
+    },
+    {
+      "sample_idx": 10,
+      "sampler_type": "ddpm",
+      "gen_time_key": "time_domain",
+      "mse_cond4_vs_target": 0.0036177171859890223,
+      "mse_gen0_vs_target": 0.2952341139316559,
+      "mse_gen0_maglp_vs_target": 0.018867086619138718,
+      "mag_lowpass_hz": 40.0,
+      "mag_lowpass_kind": "taper",
+      "mag_lowpass_transition_bins": 8
+    },
+    {
+      "sample_idx": 11,
+      "sampler_type": "ddpm",
+      "gen_time_key": "time_domain",
+      "mse_cond4_vs_target": 0.0056303427554667,
+      "mse_gen0_vs_target": 0.4848404824733734,
+      "mse_gen0_maglp_vs_target": 0.07706394046545029,
+      "mag_lowpass_hz": 40.0,
+      "mag_lowpass_kind": "taper",
+      "mag_lowpass_transition_bins": 8
+    },
+    {
+      "sample_idx": 12,
+      "sampler_type": "ddpm",
+      "gen_time_key": "time_domain",
+      "mse_cond4_vs_target": 0.004498952534049749,
+      "mse_gen0_vs_target": 0.24054722487926483,
+      "mse_gen0_maglp_vs_target": 0.042022138833999634,
+      "mag_lowpass_hz": 40.0,
+      "mag_lowpass_kind": "taper",
+      "mag_lowpass_transition_bins": 8
+    },
+    {
+      "sample_idx": 13,
+      "sampler_type": "ddpm",
+      "gen_time_key": "time_domain",
+      "mse_cond4_vs_target": 0.0037918530870229006,
+      "mse_gen0_vs_target": 0.24093759059906006,
+      "mse_gen0_maglp_vs_target": 0.03379516303539276,
+      "mag_lowpass_hz": 40.0,
+      "mag_lowpass_kind": "taper",
+      "mag_lowpass_transition_bins": 8
+    },
+    {
+      "sample_idx": 14,
+      "sampler_type": "ddpm",
+      "gen_time_key": "time_domain",
+      "mse_cond4_vs_target": 0.00408377218991518,
+      "mse_gen0_vs_target": 0.17456084489822388,
+      "mse_gen0_maglp_vs_target": 0.03810063377022743,
+      "mag_lowpass_hz": 40.0,
+      "mag_lowpass_kind": "taper",
+      "mag_lowpass_transition_bins": 8
+    },
+    {
+      "sample_idx": 15,
+      "sampler_type": "ddpm",
+      "gen_time_key": "time_domain",
+      "mse_cond4_vs_target": 0.0041975704953074455,
+      "mse_gen0_vs_target": 0.2546868622303009,
+      "mse_gen0_maglp_vs_target": 0.04304075613617897,
+      "mag_lowpass_hz": 40.0,
+      "mag_lowpass_kind": "taper",
+      "mag_lowpass_transition_bins": 8
+    }
+  ]
+}

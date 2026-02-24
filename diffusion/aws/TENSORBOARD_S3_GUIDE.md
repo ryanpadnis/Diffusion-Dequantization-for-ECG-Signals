@@ -30,12 +30,12 @@ After downloading logs from S3:
 ```bash
 # Download your run
 uv run python -m diffusion.aws.download_s3_artifacts \
-  --s3 s3://YOUR_BUCKET/ee269project \
+  --s3 s3://anyscale-production-data-cld-uvdckbb6ukmk9fu8g3nxxudemt/ee269project \
   --region us-east-1 \
-  --run-id 20260204_215551
+  --run-id 20260212_211925
 
 # Start tensorboard
-uv run tensorboard --logdir diffusion/results/V1/20260204_215551/logs
+uv run tensorboard --logdir  s3://anyscale-production-data-cld-uvdckbb6ukmk9fu8g3nxxudemt/ee269project/diffusion-results/V1/20260212_211925/logs/20260212_211925/diffusion_training
 
 # Open browser
 open http://localhost:6006

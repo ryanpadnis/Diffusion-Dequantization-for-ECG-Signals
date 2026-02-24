@@ -1,8 +1,8 @@
-"""Download all training/sampling artifacts from S3 and optionally delete from S3.
+"""Download training/sampling artifacts from S3 and optionally delete from S3.
 
 This script:
 1. Downloads all run artifacts from S3 to local directory structure
-2. Preserves the same folder structure (diffusion-results/V1/<run_id>/)
+2. Preserves the same folder structure (diffusion-results/<version>/<run_id>/)
 3. Optionally deletes the S3 data after successful download
 
 Downloaded artifacts include:
@@ -11,61 +11,38 @@ Downloaded artifacts include:
 - Generated samples (samples/*.png, samples/*.pt)
 - Config and metadata (config.pkl)
 
-Usage Examples:
+Usage Examples (copy/paste safe):
 
-  # Download essentials only (fast - best for most cases)
-  uv run python -m diffusion.aws.download_s3_artifacts \\
-    --run-id 20260204_215551 \\
-    --best-only
+    # Download essentials only (fast - best for most cases)
+    uv run python -m diffusion.aws.download_s3_artifacts --version V4 --run-id 20260213_202346 --best-only
+    uv run diffusion/aws/download_s3_artifacts.py --version V1/Sigmoid --run-id 20260216_161119 
 
-  # Download logs and samples only (skip all checkpoints)
-  uv run python -m diffusion.aws.download_s3_artifacts \\
-    --run-id 20260204_215551 \\
-    --no-checkpoints
+    # Download logs and samples only (skip all checkpoints)
+    uv run python -m diffusion.aws.download_s3_artifacts --version V4 --run-id 20260213_202346 --no-checkpoints
 
-  # Download specific run (keep in S3)
-  uv run python -m diffusion.aws.download_s3_artifacts \\
-    --s3 s3://YOUR_BUCKET/ee269project \\
-    --region us-east-1 \\
-    --run-id 20260204_215551
+    # Download samples/ ONLY (fastest - just the generated .pt/.png files)
+    uv run python -m diffusion.aws.download_s3_artifacts --version V7 --run-id 20260218_2000313 --samples-only
 
-  # Download specific run and DELETE from S3 after
-  uv run python -m diffusion.aws.download_s3_artifacts \\
-    --s3 s3://YOUR_BUCKET/ee269project \\
-    --region us-east-1 \\
-    --run-id 20260204_215551 \\
-    --delete-after
+    # Download specific run (keep in S3)
+    uv run python -m diffusion.aws.download_s3_artifacts --s3 s3://YOUR_BUCKET/ee269project --region us-east-1 --version V4 --run-id 20260213_202346
 
-  # Download ALL runs (keep in S3)
-  uv run python -m diffusion.aws.download_s3_artifacts \\
-    --s3 s3://YOUR_BUCKET/ee269project \\
-    --region us-east-1 \\
-    --all
+    # Download specific run and DELETE from S3 after
+    uv run python -m diffusion.aws.download_s3_artifacts --s3 s3://YOUR_BUCKET/ee269project --region us-east-1 --version V4 --run-id 20260213_202346 --delete-after
 
-  # Download ALL runs and DELETE from S3 after
-  uv run python -m diffusion.aws.download_s3_artifacts \\
-    --s3 s3://YOUR_BUCKET/ee269project \\
-    --region us-east-1 \\
-    --all \\
-    --delete-after
+    # Download ALL runs (keep in S3)
+    uv run python -m diffusion.aws.download_s3_artifacts --s3 s3://YOUR_BUCKET/ee269project --region us-east-1 --version V4 --all
 
-  # Preview what will happen (dry run)
-  uv run python -m diffusion.aws.download_s3_artifacts \\
-    --s3 s3://YOUR_BUCKET/ee269project \\
-    --region us-east-1 \\
-    --all \\
-    --delete-after \\
-    --dry-run
+    # Download ALL runs and DELETE from S3 after
+    uv run python -m diffusion.aws.download_s3_artifacts --s3 s3://YOUR_BUCKET/ee269project --region us-east-1 --version V4 --all --delete-after
 
-  # Download everything including preprocessed data cache
-  uv run python -m diffusion.aws.download_s3_artifacts \\
-    --s3 s3://YOUR_BUCKET/ee269project \\
-    --region us-east-1 \\
-    --all \\
-    --include-data
+    # Preview what will happen (dry run)
+    uv run python -m diffusion.aws.download_s3_artifacts --s3 s3://YOUR_BUCKET/ee269project --region us-east-1 --version V4 --all --delete-after --dry-run
+
+    # Download everything including preprocessed data cache
+    uv run python -m diffusion.aws.download_s3_artifacts --s3 s3://YOUR_BUCKET/ee269project --region us-east-1 --version V4 --all --include-data
 
 After downloading, view tensorboard logs:
-  uv run tensorboard --logdir diffusion/results/V1/20260204_215551/logs
+    uv run tensorboard --logdir diffusion/results/V4/20260213_202346/logs
   open http://localhost:6006
 
 Safety Features:
@@ -116,6 +93,12 @@ def _parse_args() -> argparse.Namespace:
         help="AWS region (default: us-east-1)",
     )
     p.add_argument(
+        "--version",
+        type=str,
+        default="V1",
+        help="Experiment version under diffusion-results/ (default: V1)",
+    )
+    p.add_argument(
         "--run-id",
         type=str,
         default=None,
@@ -130,7 +113,7 @@ def _parse_args() -> argparse.Namespace:
         "--local-dir",
         type=str,
         default=None,
-        help="Local destination directory (default: ./diffusion/results/V1/)",
+        help="Local destination directory (default: ./diffusion/results/<version>/)",
     )
     p.add_argument(
         "--delete-after",
@@ -157,6 +140,11 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Skip all checkpoints (only download logs and samples)",
     )
+    p.add_argument(
+        "--samples-only",
+        action="store_true",
+        help="Only download files under samples/ (skip checkpoints, logs, config, data cache)",
+    )
 
     return p.parse_args()
 
@@ -175,9 +163,10 @@ def _parse_s3_uri(uri: str) -> tuple[str, str]:
     return bucket, prefix
 
 
-def _list_runs(s3_client, bucket: str, prefix: str) -> List[str]:
-    """List all run IDs under s3://bucket/prefix/diffusion-results/V1/."""
-    runs_prefix = f"{prefix}/diffusion-results/V1/".lstrip("/")
+def _list_runs(s3_client, bucket: str, prefix: str, version: str = "V1") -> List[str]:
+    """List all run IDs under s3://bucket/prefix/diffusion-results/<version>/."""
+    version = str(version or "V1").strip() or "V1"
+    runs_prefix = f"{prefix}/diffusion-results/{version}/".lstrip("/")
     
     paginator = s3_client.get_paginator("list_objects_v2")
     run_ids = set()
@@ -185,16 +174,17 @@ def _list_runs(s3_client, bucket: str, prefix: str) -> List[str]:
     for page in paginator.paginate(Bucket=bucket, Prefix=runs_prefix, Delimiter="/"):
         for common_prefix in page.get("CommonPrefixes", []):
             run_path = common_prefix["Prefix"]
-            # Extract run_id from: prefix/diffusion-results/V1/20260204_215551/
+            # Extract run_id from: prefix/diffusion-results/<version>/<run_id>/
             run_id = run_path.rstrip("/").split("/")[-1]
             run_ids.add(run_id)
     
     return sorted(run_ids)
 
 
-def _get_run_size(s3_client, bucket: str, prefix: str, run_id: str) -> tuple[int, int]:
+def _get_run_size(s3_client, bucket: str, prefix: str, run_id: str, version: str = "V1") -> tuple[int, int]:
     """Get total size of a run in bytes. Returns (num_files, total_bytes)."""
-    s3_run_prefix = f"{prefix}/diffusion-results/V1/{run_id}/".lstrip("/")
+    version = str(version or "V1").strip() or "V1"
+    s3_run_prefix = f"{prefix}/diffusion-results/{version}/{run_id}/".lstrip("/")
     
     paginator = s3_client.get_paginator("list_objects_v2")
     total_bytes = 0
@@ -217,8 +207,11 @@ def _format_size(bytes: int) -> str:
     return f"{bytes:.2f} TB"
 
 
-def _should_download(key: str, best_only: bool, no_checkpoints: bool) -> bool:
+def _should_download(key: str, best_only: bool, no_checkpoints: bool, samples_only: bool = False) -> bool:
     """Check if a file should be downloaded based on filters."""
+    if samples_only:
+        return "/samples/" in key
+
     # Always download config.pkl
     if key.endswith("config.pkl"):
         return True
@@ -239,13 +232,16 @@ def _download_run(
     bucket: str,
     prefix: str,
     run_id: str,
+    version: str,
     local_base: Path,
     dry_run: bool = False,
     best_only: bool = False,
     no_checkpoints: bool = False,
+    samples_only: bool = False,
 ) -> tuple[List[str], List[str]]:
     """Download files for a run. Returns (downloaded_keys, all_keys_in_run)."""
-    s3_run_prefix = f"{prefix}/diffusion-results/V1/{run_id}/".lstrip("/")
+    version = str(version or "V1").strip() or "V1"
+    s3_run_prefix = f"{prefix}/diffusion-results/{version}/{run_id}/".lstrip("/")
     local_run_dir = local_base / run_id
     
     if not dry_run:
@@ -258,6 +254,8 @@ def _download_run(
         print(f"  Filter: best_model.pt + logs + samples + config only")
     if no_checkpoints:
         print(f"  Filter: skipping all checkpoints")
+    if samples_only:
+        print(f"  Filter: samples/ only")
     
     paginator = s3_client.get_paginator("list_objects_v2")
     downloaded_keys = []
@@ -274,7 +272,7 @@ def _download_run(
     all_keys = [obj["Key"] for obj in all_objects]
     
     # Filter objects based on options
-    filtered_objects = [obj for obj in all_objects if _should_download(obj["Key"], best_only, no_checkpoints)]
+    filtered_objects = [obj for obj in all_objects if _should_download(obj["Key"], best_only, no_checkpoints, samples_only)]
     
     print(f"  Found {len(all_objects)} files total, downloading {len(filtered_objects)} files")
     
@@ -306,12 +304,14 @@ def _download_data_cache(
     s3_client,
     bucket: str,
     prefix: str,
+    version: str,
     local_base: Path,
     dry_run: bool = False,
 ) -> List[str]:
     """Download preprocessed data cache. Returns list of S3 keys downloaded."""
-    s3_data_prefix = f"{prefix}/data/V1/".lstrip("/")
-    local_data_dir = local_base.parent.parent / "data" / "V1"
+    version = str(version or "V1").strip() or "V1"
+    s3_data_prefix = f"{prefix}/data/{version}/".lstrip("/")
+    local_data_dir = local_base.parent.parent / "data" / version
     
     if not dry_run:
         local_data_dir.mkdir(parents=True, exist_ok=True)
@@ -385,6 +385,8 @@ def _delete_s3_keys(
 
 def main() -> None:
     args = _parse_args()
+
+    version = str(args.version or "V1").strip() or "V1"
     
     if args.run_id and args.all:
         raise SystemExit("Error: --run-id and --all are mutually exclusive")
@@ -398,8 +400,8 @@ def main() -> None:
     if args.local_dir:
         local_base = Path(args.local_dir)
     else:
-        # Default to diffusion/results/V1/
-        local_base = Path(__file__).parent.parent / "results" / "V1"
+        # Default to diffusion/results/<version>/
+        local_base = Path(__file__).parent.parent / "results" / version
     
     local_base = local_base.resolve()
     local_base.mkdir(parents=True, exist_ok=True)
@@ -424,7 +426,7 @@ def main() -> None:
     # Determine which runs to download
     if args.all:
         print("[Scanning] Finding all runs in S3...")
-        run_ids = _list_runs(s3_client, bucket, prefix)
+        run_ids = _list_runs(s3_client, bucket, prefix, version)
         if not run_ids:
             print("No runs found in S3.")
             return
@@ -439,7 +441,7 @@ def main() -> None:
         total_files_before = 0
         total_bytes_before = 0
         for run_id in run_ids:
-            num_files, num_bytes = _get_run_size(s3_client, bucket, prefix, run_id)
+            num_files, num_bytes = _get_run_size(s3_client, bucket, prefix, run_id, version)
             total_files_before += num_files
             total_bytes_before += num_bytes
             print(f"  {run_id}: {num_files} files, {_format_size(num_bytes)}")
@@ -451,10 +453,11 @@ def main() -> None:
     all_keys_to_delete = []  # ALL keys in the runs (for --delete-after)
     for run_id in run_ids:
         downloaded_keys, all_run_keys = _download_run(
-            s3_client, bucket, prefix, run_id, local_base, 
+            s3_client, bucket, prefix, run_id, version, local_base,
             dry_run=args.dry_run,
             best_only=args.best_only,
-            no_checkpoints=args.no_checkpoints
+            no_checkpoints=args.no_checkpoints,
+            samples_only=args.samples_only,
         )
         all_downloaded_keys.extend(downloaded_keys)
         all_keys_to_delete.extend(all_run_keys)
@@ -462,7 +465,7 @@ def main() -> None:
     
     # Optionally download preprocessed data cache
     if args.include_data:
-        data_keys = _download_data_cache(s3_client, bucket, prefix, local_base, dry_run=args.dry_run)
+        data_keys = _download_data_cache(s3_client, bucket, prefix, version, local_base, dry_run=args.dry_run)
         all_downloaded_keys.extend(data_keys)
         # Don't delete data cache
         print()
@@ -485,7 +488,7 @@ def main() -> None:
             total_files_after = 0
             total_bytes_after = 0
             for run_id in run_ids:
-                num_files, num_bytes = _get_run_size(s3_client, bucket, prefix, run_id)
+                num_files, num_bytes = _get_run_size(s3_client, bucket, prefix, run_id, version)
                 total_files_after += num_files
                 total_bytes_after += num_bytes
                 if num_files > 0:
@@ -506,3 +509,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+

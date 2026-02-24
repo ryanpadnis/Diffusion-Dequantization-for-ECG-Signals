@@ -36,7 +36,7 @@ from typing import List, Optional
 
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(add_help=True)
-    p.add_argument("--workspace", type=str, default="EE269-spot2", help="Anyscale workspace name")
+    p.add_argument("--workspace", type=str, default="EE269-ondemand", help="Anyscale workspace name")
     p.add_argument("--region", type=str, default="us-east-1", help="AWS region (default: us-east-1)")
     p.add_argument(
         "--s3",
@@ -50,6 +50,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--bundle-include-data", action="store_true", help="Include results data/ in the run bundle")
     p.add_argument("--force-preprocess", action="store_true", help="Force regenerate preprocessed data from raw dataset (uploads to S3)")
     p.add_argument("--preprocess-locally", action="store_true", help="Run preprocessing locally BEFORE training (forces regeneration with current config)")
+    p.add_argument("--resume-latest", action="store_true", help="Resume training from the latest S3 run checkpoint")
 
     # S3 data is automatically checked and prepared if missing (no flag needed)
 
@@ -204,8 +205,12 @@ def _remote_script(args: argparse.Namespace, *, code_bundle_s3_uri: str) -> str:
         train_flags.append("--bundle-run")
     if args.bundle_include_data:
         train_flags.append("--bundle-include-data")
-    if args.force_preprocess:
-        train_flags.append("--force-preprocess")
+    # NOTE: We intentionally do NOT pass --force-preprocess into the remote Ray training.
+    # Raw data is not bundled to the workspace, so remote force-preprocess is typically disabled
+    # (or would fail). If the user wants regeneration, we run preprocessing BEFORE Ray on the
+    # local machine via --preprocess-locally (triggered below in main).
+    if args.resume_latest:
+        train_flags.extend(["--resume-from-s3", "latest"])
     if args.epochs is not None:
         train_flags.extend(["--epochs", str(int(args.epochs))])
     if args.max_batches is not None:
@@ -227,7 +232,11 @@ export AWS_REGION={shlex.quote(str(args.region))}
 
 # IMPORTANT: Avoid using ~/default (stale workspace checkout).
 # We always run from a fresh code bundle uploaded from your laptop.
-WORKDIR=$(mktemp -d /tmp/ee269_run_XXXXXX)
+# Use a stable working directory (not /tmp) so paths are predictable.
+WORKDIR="$HOME/ee269_run/current"
+rm -rf "$WORKDIR"
+mkdir -p "$WORKDIR"
+export WORKDIR
 echo "[anyscale_train] Using WORKDIR=$WORKDIR"
 
 # Ensure boto3 exists on the head node for downloading the bundle.
@@ -248,7 +257,7 @@ bucket, _, key = rest.partition("/")
 if not bucket or not key:
     raise RuntimeError(f"Bad bundle uri: {{bundle_uri}}")
 
-workdir = Path(os.environ["WORKDIR"])
+workdir = Path(os.environ.get("WORKDIR") or ".").resolve()
 tar_path = workdir / "code_bundle.tar.gz"
 
 s3 = boto3.client("s3")
@@ -262,8 +271,46 @@ PY
 
 cd "$WORKDIR"
 
+    # Make the working directory importable in a robust way.
+    # Editable install is lightweight and ensures `python -m diffusion...` resolves to this code.
+    python -m pip install -q -e . || true
+
+echo "[anyscale_train] Debug: pwd=$(pwd)"
+echo "[anyscale_train] Debug: config.py max_batches line:"
+python - <<'PY'
+from pathlib import Path
+
+p = Path('diffusion/utils/config.py')
+if p.exists():
+    for line in p.read_text().splitlines():
+        if 'max_batches' in line:
+            print('  ', line)
+            break
+else:
+    print('  (missing diffusion/utils/config.py in WORKDIR)')
+PY
+
+echo "[anyscale_train] Debug: import locations:"
+python - <<'PY'
+import diffusion
+from diffusion.utils.config import DiffusionConfig
+import diffusion.utils.config as cfg_mod
+
+print('  diffusion.__file__         =', getattr(diffusion, '__file__', None))
+print('  diffusion.utils.config.__file__ =', getattr(cfg_mod, '__file__', None))
+print('  DiffusionConfig.__version__ =', getattr(DiffusionConfig, '__version__', None))
+print('  DiffusionConfig.max_batches =', getattr(DiffusionConfig, 'max_batches', None))
+PY
+
 echo "[anyscale_train] Verifying config from bundle..."
-python -c "from diffusion.utils.config import DiffusionConfig; print(f'  -> config.__version__={{getattr(DiffusionConfig, '__version__', 'N/A')}} max_batches={{DiffusionConfig.max_batches}}')"
+python - <<'PY'
+from diffusion.utils.config import DiffusionConfig
+
+print(
+    "  -> config.__version__=%s max_batches=%s"
+    % (getattr(DiffusionConfig, "__version__", "N/A"), getattr(DiffusionConfig, "max_batches", None))
+)
+PY
 
 # IMPORTANT: Do NOT `ray stop` on Ctrl+C (that kills the whole cluster).
 trap 'echo "[anyscale_train] Interrupt received. Exiting without ray stop."; exit 130' INT TERM
@@ -433,6 +480,11 @@ def main() -> None:
     signal.signal(signal.SIGINT, _signal_handler)
     
     # Local preprocessing option: regenerate data with current config before training
+    # If --force-preprocess is requested, do it BEFORE Ray by regenerating+uploading locally.
+    # (This also avoids relying on remote raw dataset availability.)
+    if args.force_preprocess and args.s3:
+        args.preprocess_locally = True
+
     if args.preprocess_locally and args.s3:
         local_cmd = [
             "python",

@@ -1,25 +1,31 @@
-# Minimal compute config for a 1-GPU training setup in us-east-1.
-# Edit `cloud:` to the Anyscale Cloud name you register in us-east-1 (we'll use: EE269).
-# Adjust instance types to match your quota/cost targets.
-
 cloud: EE269
-
-# Avoid us-east-1b (no g6.xlarge capacity), use us-east-1a, us-east-1c, us-east-1d instead
-availability_zones:
-  - us-east-1a
-  - us-east-1c
-  - us-east-1d
 
 head_node:
   instance_type: m5.xlarge
 
 worker_nodes:
-  - name: gpu-worker
-    # GPU instances you can use (4 vCPU quota):
-    # g6.xlarge:    4 vCPU, 1x L4 GPU (newest, ~$0.25/hr spot)       <- RECOMMENDED
-    # g5.xlarge:    4 vCPU, 1x A10G GPU (~$0.30/hr spot)
-    # g4dn.xlarge:  4 vCPU, 1x T4 GPU (~$0.16/hr spot, older/slower)
+  - name: gpu-worker-l4
     instance_type: g6.xlarge
+    market_type: ON_DEMAND
     min_nodes: 0
-    max_nodes: 1
-    market_type: SPOT
+    max_nodes: 10
+  - name: gpu-worker-v100
+    instance_type: p3.2xlarge
+    market_type: ON_DEMAND
+    min_nodes: 0
+    max_nodes: 10
+  - name: gpu-worker-a10g
+    instance_type: g5.xlarge
+    market_type: ON_DEMAND
+    min_nodes: 0
+    max_nodes: 10
+  - name: gpu-worker-4x-a10g
+    instance_type: g5.12xlarge # 4x A10G GPUs
+    market_type: ON_DEMAND
+    min_nodes: 0
+    max_nodes: 2
+  - name: gpu-worker-8x-v100
+    instance_type: p3.16xlarge # 8x V100 GPUs
+    market_type: ON_DEMAND
+    min_nodes: 0
+    max_nodes: 2
