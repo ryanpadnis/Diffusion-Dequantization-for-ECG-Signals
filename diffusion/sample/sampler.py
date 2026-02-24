@@ -8,6 +8,7 @@ from typing import Optional
 from tqdm import tqdm
 
 from diffusion.utils.torch_utils import resolve_torch_dtype
+from data.utils.transforms import SpectrogramMagNormalizer
 
 
 class DiffusionSampler:
@@ -238,50 +239,11 @@ class DiffusionSampler:
             phase_norm = torch.clamp(phase_ch.to(torch.float32) / math.pi, -1.0, 1.0)
 
         # Per-sample normalization (must match diffusion/utils/runner.py)
-        mag_norm_mode = str(self.config.get('mag_norm_mode', 'minmax') or 'minmax').strip().lower()
-        mag_norm_eps = float(self.config.get('mag_norm_epsilon', 1e-8) or 1e-8)
-        if mag_norm_eps <= 0:
-            mag_norm_eps = 1e-8
-
-        if mag_norm_mode in {'zscore', 'z_score', 'standardize'}:
-            mag_norm_mode = 'zscore'
-            clamp_sigma = float(self.config.get('mag_norm_clamp_sigma', 3.0) or 3.0)
-            if clamp_sigma <= 0:
-                clamp_sigma = 3.0
-            cond_mean = mag.mean(dim=(2, 3), keepdim=True)
-            cond_std = mag.std(dim=(2, 3), keepdim=True, unbiased=False)
-            denom = cond_std * clamp_sigma
-            denom = torch.where(denom.abs() < mag_norm_eps, torch.ones_like(denom), denom)
-            cond_min = cond_mean  # store mean as offset for denorm
-
-            normalized = (mag - cond_mean) / denom
-            normalized = torch.clamp(normalized, -1.0, 1.0)
-        elif mag_norm_mode in {'absmax', 'peak', 'max'}:
-            mag_norm_mode = 'absmax'
-            # Magnitudes are non-negative: use peak as scale and ignore min.
-            cond_peak = mag.amax(dim=(2, 3), keepdim=True)
-            denom = torch.where(cond_peak.abs() < mag_norm_eps, torch.ones_like(cond_peak), cond_peak)
-            cond_min = torch.zeros_like(denom)
-            normalized = mag / denom
-            normalized = normalized * 2.0 - 1.0
-            normalized = torch.clamp(normalized, -1.0, 1.0)
-        elif mag_norm_mode in {'none', 'off', 'identity'}:
-            mag_norm_mode = 'none'
-            # Identity: no normalization — pass raw magnitude through (denom=1, min=0)
-            cond_min = torch.zeros(mag.shape[0], 1, 1, 1, dtype=mag.dtype, device=mag.device)
-            denom = torch.ones_like(cond_min)
-            normalized = mag  # no transform; magnitudes are already non-negative
-        else:
-            mag_norm_mode = 'minmax'
-            # Default: min/max range.
-            cond_min = mag.amin(dim=(2, 3), keepdim=True)
-            cond_max = mag.amax(dim=(2, 3), keepdim=True)
-            denom = cond_max - cond_min
-            denom = torch.where(denom.abs() < mag_norm_eps, torch.ones_like(denom), denom)
-
-            normalized = (mag - cond_min) / denom
-            normalized = normalized * 2.0 - 1.0
-            normalized = torch.clamp(normalized, -1.0, 1.0)
+        mag_normalizer = SpectrogramMagNormalizer.from_config(self.config)
+        normalized, _, _norm_stats = mag_normalizer.normalize(mag)
+        cond_min = _norm_stats['cond_min']
+        denom = _norm_stats['denom']
+        mag_norm_mode = _norm_stats['mode']
 
         # Save for postprocess inversion.
         self._last_cond_min = cond_min.detach().clone()

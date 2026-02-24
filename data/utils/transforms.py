@@ -4,6 +4,7 @@ import torch
 from abc import ABC, abstractmethod
 
 
+
 # Abstract base class for all transforms
 class SignalTransform(ABC):
     """Abstract base class for signal transforms."""
@@ -467,6 +468,147 @@ class NormalizationTransform(SignalTransform):
         data = data.to(dtype=self.torch_dtype, device=self.device)
         denorm01 = (data - self.target_min) / (self.target_max - self.target_min + 1e-8)
         return denorm01 * (self.data_max - self.data_min) + self.data_min
+
+
+class SpectrogramMagNormalizer:
+    """Per-sample condition-derived spectrogram magnitude normalizer.
+
+    Matches the normalization used in diffusion training (runner.py) and
+    inference (sampler.py). Supports four modes:
+
+        - 'zscore'  : (x - cond_mean) / (cond_std * clamp_sigma), clamped to [-1,1]
+        - 'minmax'  : (x - cond_min) / (cond_max - cond_min) * 2 - 1, clamped to [-1,1]
+        - 'absmax'  : x / cond_peak * 2 - 1, clamped to [-1,1]
+        - 'none'    : identity (no transform)
+
+    Usage::
+
+        norm = SpectrogramMagNormalizer.from_config(config)
+
+        # Normalize — returns (normalized_cond, normalized_real, stats)
+        cond_norm, real_norm, stats = norm.normalize(cond_mag, real_mag)
+
+        # Denormalize a generated output back to magnitude scale
+        mag = norm.denormalize(generated_mag, stats)
+    """
+
+    def __init__(
+        self,
+        mode: str = 'minmax',
+        clamp_sigma: float = 3.0,
+        epsilon: float = 1e-8,
+    ):
+        mode = str(mode or 'minmax').strip().lower()
+        if mode in {'zscore', 'z_score', 'standardize'}:
+            mode = 'zscore'
+        elif mode in {'absmax', 'peak', 'max'}:
+            mode = 'absmax'
+        elif mode in {'none', 'off', 'identity'}:
+            mode = 'none'
+        else:
+            mode = 'minmax'
+        self.mode = mode
+        self.clamp_sigma = float(clamp_sigma) if clamp_sigma > 0 else 3.0
+        self.epsilon = float(epsilon) if epsilon > 0 else 1e-8
+
+    @classmethod
+    def from_config(cls, config: dict) -> 'SpectrogramMagNormalizer':
+        """Build from a diffusion config dict (same keys used in runner.py)."""
+        return cls(
+            mode=str(config.get('mag_norm_mode', 'minmax') or 'minmax'),
+            clamp_sigma=float(config.get('mag_norm_clamp_sigma', 3.0) or 3.0),
+            epsilon=float(config.get('mag_norm_epsilon', 1e-8) or 1e-8),
+        )
+
+    def normalize(
+        self,
+        cond_mag: torch.Tensor,
+        real_mag: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, dict]:
+        """Normalize magnitudes using condition-derived stats.
+
+        Args:
+            cond_mag: Condition magnitude tensor, shape [N, 1, F, T] or [N, F, T].
+            real_mag: Real/target magnitude tensor (same shape). Optional.
+
+        Returns:
+            (cond_norm, real_norm, stats) where stats contains cond_min and denom
+            needed for denormalization. real_norm is None if real_mag is None.
+        """
+        cond = cond_mag.to(torch.float32)
+        real = real_mag.to(torch.float32) if real_mag is not None else None
+
+        # Reduce over spatial dims; handle both [N,1,F,T] and [N,F,T].
+        spatial_dims = (2, 3) if cond.ndim == 4 else (1, 2)
+
+        if self.mode == 'zscore':
+            cond_mean = cond.mean(dim=spatial_dims, keepdim=True)
+            cond_std = cond.std(dim=spatial_dims, keepdim=True, unbiased=False)
+            denom = cond_std * self.clamp_sigma
+            denom = torch.where(denom.abs() < self.epsilon, torch.ones_like(denom), denom)
+            cond_min = cond_mean  # stores mean for denorm
+
+            cond_norm = torch.clamp((cond - cond_mean) / denom, -1.0, 1.0)
+            real_norm = torch.clamp((real - cond_mean) / denom, -1.0, 1.0) if real is not None else None
+
+        elif self.mode == 'absmax':
+            cond_peak = cond.amax(dim=spatial_dims, keepdim=True)
+            denom = torch.where(cond_peak.abs() < self.epsilon, torch.ones_like(cond_peak), cond_peak)
+            cond_min = torch.zeros_like(denom)
+
+            cond_norm = torch.clamp(cond / denom * 2.0 - 1.0, -1.0, 1.0)
+            real_norm = torch.clamp(real / denom * 2.0 - 1.0, -1.0, 1.0) if real is not None else None
+
+        elif self.mode == 'none':
+            n = cond.shape[0]
+            singleton = [n] + [1] * (cond.ndim - 1)
+            cond_min = torch.zeros(singleton, dtype=cond.dtype, device=cond.device)
+            denom = torch.ones_like(cond_min)
+
+            cond_norm = cond
+            real_norm = real
+
+        else:  # minmax
+            cond_min = cond.amin(dim=spatial_dims, keepdim=True)
+            cond_max = cond.amax(dim=spatial_dims, keepdim=True)
+            denom = cond_max - cond_min
+            denom = torch.where(denom.abs() < self.epsilon, torch.ones_like(denom), denom)
+
+            cond_norm = torch.clamp((cond - cond_min) / denom * 2.0 - 1.0, -1.0, 1.0)
+            real_norm = torch.clamp((real - cond_min) / denom * 2.0 - 1.0, -1.0, 1.0) if real is not None else None
+
+        stats = {
+            'cond_min': cond_min.detach().clone(),
+            'denom': denom.detach().clone(),
+            'mode': self.mode,
+        }
+        return cond_norm, real_norm, stats
+
+    def denormalize(self, generated_mag: torch.Tensor, stats: dict) -> torch.Tensor:
+        """Invert normalization using stats from a previous normalize() call.
+
+        Args:
+            generated_mag: Model output in normalized space.
+            stats: Dict returned by normalize() containing cond_min and denom.
+
+        Returns:
+            Magnitude tensor in original (physical) scale, clamped >= 0.
+        """
+        x = generated_mag.to(torch.float32)
+        cond_min = stats['cond_min'].to(x.dtype).to(x.device)
+        denom = stats['denom'].to(x.dtype).to(x.device)
+        mode = stats.get('mode', self.mode)
+
+        if mode == 'zscore':
+            out = x * denom + cond_min
+        elif mode == 'none':
+            out = x
+        else:  # minmax / absmax both use (x+1)/2 * denom + min
+            out = (x + 1.0) / 2.0 * denom + cond_min
+
+        if mode != 'none':
+            out = torch.clamp(out, min=0.0)
+        return out
 
 
 AVAILABLE_TRANSFORMS = {

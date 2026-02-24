@@ -15,7 +15,7 @@ import tempfile
 
 import torch
 
-from data.utils.transforms import get_transform, AVAILABLE_TRANSFORMS
+from data.utils.transforms import get_transform, AVAILABLE_TRANSFORMS, SpectrogramMagNormalizer
 from data.utils.quantizers import UniformQuantizer, compute_range_from_tensor
 
 
@@ -741,17 +741,16 @@ def process_data_before_training(config:dict):
     if mag_norm_eps <= 0 or (not math.isfinite(mag_norm_eps)):
         mag_norm_eps = 1e-8
 
-    if mag_norm_mode in {'absmax', 'peak', 'max'}:
-        mag_norm_mode = 'absmax'
+    mag_normalizer = SpectrogramMagNormalizer.from_config(config)
+    mag_norm_mode = mag_normalizer.mode
+
+    if mag_norm_mode == 'absmax':
         print(f"[train_diffuser] Normalizing spectrogram magnitudes using per-sample condition absmax (peak)")
-    elif mag_norm_mode in {'zscore', 'z_score', 'standardize'}:
-        mag_norm_mode = 'zscore'
+    elif mag_norm_mode == 'zscore':
         print(f"[train_diffuser] Normalizing spectrogram magnitudes using per-sample z-score (mean/std, clamp_sigma={config.get('mag_norm_clamp_sigma', 3.0)})")
-    elif mag_norm_mode in {'none', 'off', 'identity'}:
-        mag_norm_mode = 'none'
+    elif mag_norm_mode == 'none':
         print(f"[train_diffuser] Spectrogram magnitude normalization DISABLED (raw values passed to model)")
     else:
-        mag_norm_mode = 'minmax'
         print(f"[train_diffuser] Normalizing spectrogram magnitudes using per-sample condition min/max")
 
     cond_data = cond_data.to(torch.float32)
@@ -768,51 +767,9 @@ def process_data_before_training(config:dict):
         cond_data = cond_mag_ch
         real_data = real_mag_ch
 
-    # Per-sample condition-derived scaling stats: shape [N, 1, 1, 1]
-    if mag_norm_mode == 'none':
-        # Identity: no transform, denom=1 and min=0 so denorm = x * 1 + 0 = x
-        cond_min = torch.zeros(cond_data.shape[0], 1, 1, 1, dtype=cond_data.dtype, device=cond_data.device)
-        denom = torch.ones_like(cond_min)
-        # No clamp — data is passed raw
-    elif mag_norm_mode == 'zscore':
-        clamp_sigma = float(config.get('mag_norm_clamp_sigma', 3.0) or 3.0)
-        if clamp_sigma <= 0 or not math.isfinite(clamp_sigma):
-            clamp_sigma = 3.0
-        cond_mean = cond_data.mean(dim=(2, 3), keepdim=True)
-        cond_std = cond_data.std(dim=(2, 3), keepdim=True, unbiased=False)
-        # denom = std * clamp_sigma  so that ±clamp_sigma std devs map to ±1
-        denom = cond_std * clamp_sigma
-        denom = torch.where(denom.abs() < mag_norm_eps, torch.ones_like(denom), denom)
-        cond_min = cond_mean  # repurposed: stores mean for denorm = x * denom + mean
-
-        cond_data = (cond_data - cond_mean) / denom
-        real_data = (real_data - cond_mean) / denom
-    elif mag_norm_mode == 'minmax':
-        cond_min = cond_data.amin(dim=(2, 3), keepdim=True)
-        cond_max = cond_data.amax(dim=(2, 3), keepdim=True)
-        denom = cond_max - cond_min
-        denom = torch.where(denom.abs() < mag_norm_eps, torch.ones_like(denom), denom)
-
-        cond_data = (cond_data - cond_min) / denom
-        cond_data = cond_data * 2.0 - 1.0
-        real_data = (real_data - cond_min) / denom
-        real_data = real_data * 2.0 - 1.0
-    else:
-        # absmax: magnitudes are non-negative, use condition peak as the only scale.
-        cond_peak = cond_data.amax(dim=(2, 3), keepdim=True)
-        denom = torch.where(cond_peak.abs() < mag_norm_eps, torch.ones_like(cond_peak), cond_peak)
-        cond_min = torch.zeros_like(denom)
-
-        cond_data = cond_data / denom
-        cond_data = cond_data * 2.0 - 1.0
-        real_data = real_data / denom
-        real_data = real_data * 2.0 - 1.0
-
-    # Clip to [-1, 1] to prevent numerical instability from real-data outliers.
-    # Skip clamp for 'none' mode since data is intentionally unnormalized.
-    if mag_norm_mode != 'none':
-        cond_data = torch.clamp(cond_data, -1.0, 1.0)
-        real_data = torch.clamp(real_data, -1.0, 1.0)
+    cond_data, real_data, _norm_stats = mag_normalizer.normalize(cond_data, real_data)
+    cond_min = _norm_stats['cond_min']
+    denom = _norm_stats['denom']
 
     if use_phase_channel:
         cond_data = torch.cat([cond_data, cond_phase_ch], dim=1)
