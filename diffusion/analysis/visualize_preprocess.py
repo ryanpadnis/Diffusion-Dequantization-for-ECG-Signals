@@ -16,8 +16,8 @@ import torch
 import matplotlib.pyplot as plt
 import numpy as np
 
-from data.preprocess.transform import get_transform
-from data.preprocess.quantize import UniformQuantizer
+from data.utils.transforms import get_transform
+from data.utils.quantizers import UniformQuantizer
 
 
 def main():

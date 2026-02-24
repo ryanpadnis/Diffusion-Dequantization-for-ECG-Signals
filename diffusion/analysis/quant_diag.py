@@ -20,8 +20,8 @@ import pickle
 
 import torch
 
-from data.preprocess.transform import get_transform
-from data.preprocess.quantize import UniformQuantizer
+from data.utils.transforms import get_transform
+from data.utils.quantizers import UniformQuantizer
 from diffusion.utils.quant_debug import summarize_tensor, summarize_uniform_quantizer, summarize_quantization_usage
 
 

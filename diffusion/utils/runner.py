@@ -15,8 +15,8 @@ import tempfile
 
 import torch
 
-from data.preprocess.transform import get_transform, AVAILABLE_TRANSFORMS
-from data.preprocess.quantize import UniformQuantizer, compute_range_from_tensor
+from data.utils.transforms import get_transform, AVAILABLE_TRANSFORMS
+from data.utils.quantizers import UniformQuantizer, compute_range_from_tensor
 
 
 def _per_sample_symmetric_peak(signals_time: torch.Tensor, *, lower_pct: float, upper_pct: float) -> torch.Tensor:

@@ -1,6 +1,6 @@
 {
   "sample_dir": "diffusion/results/V7/20260218_212954/samples/ddpm/sample_6",
-  "pipeline_transform": "",
+  "pipeline_transform": "stft",
   "sampler_type": "ddpm",
   "metrics": {
     "mse_spec_mag(cond4_vs_target)": 0.2748868763446808,

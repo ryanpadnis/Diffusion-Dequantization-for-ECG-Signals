@@ -60,9 +60,9 @@ class DiffusionSampler:
         Time-domain quantization is intentionally per-sample and computed in real time
         from each condition waveform only (no global ranges).
         """
-        from data.preprocess.quantize import compute_range_from_tensor
-        from data.preprocess.transform import get_transform
-        from data.preprocess.quantize import UniformQuantizer
+        from data.utils.quantizers import compute_range_from_tensor
+        from data.utils.transforms import get_transform
+        from data.utils.quantizers import UniformQuantizer
 
         from diffusion.utils.quant_debug import (
             summarize_tensor,
@@ -114,7 +114,7 @@ class DiffusionSampler:
         Training normalizes real magnitudes using ONLY condition-derived stats.
         This reproduces that so pre-inversion MSEs are apples-to-apples.
         """
-        from data.preprocess.transform import get_transform
+        from data.utils.transforms import get_transform
 
         raw_signals = self._maybe_pre_lowpass(raw_signals)
 
@@ -169,8 +169,8 @@ class DiffusionSampler:
         Training uses per-sample min/max of the *condition spectrogram magnitude*
         to normalize BOTH condition and real magnitudes.
         """
-        from data.preprocess.transform import get_transform
-        from data.preprocess.quantize import UniformQuantizer
+        from data.utils.transforms import get_transform
+        from data.utils.quantizers import UniformQuantizer
 
         # Optional: time-domain low-pass (must match training if enabled).
         raw_signals = self._maybe_pre_lowpass(raw_signals)
@@ -178,7 +178,7 @@ class DiffusionSampler:
         cond_bits = int(params['cond_bits']) #use the conditional data bit sizew
 
         # Per-sample time-domain quantization range from this condition only.
-        from data.preprocess.quantize import compute_range_from_tensor
+        from data.utils.quantizers import compute_range_from_tensor
         lower_pct = float(self.config.get('quantile_clip_lower', 0.0))
         upper_pct = float(self.config.get('quantile_clip_upper', 100.0))
         lo, hi = compute_range_from_tensor(raw_signals, lower_pct, upper_pct)
@@ -341,7 +341,7 @@ class DiffusionSampler:
         No unit-range rescaling is applied — the model is trained on [0,1] data
         and its output is directly on the condition's magnitude scale.
         """
-        from data.preprocess.transform import get_transform
+        from data.utils.transforms import get_transform
 
         pipeline_config = params['pipeline_config'].copy()
         transform_type = str(pipeline_config.get('transform', 'stft')).lower()

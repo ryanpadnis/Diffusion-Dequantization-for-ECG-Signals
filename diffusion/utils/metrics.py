@@ -240,20 +240,24 @@ def print_energy_metrics(results: dict | None) -> None:
 def main() -> None:
     # Mirror the same defaults as analysis.py main() for easy standalone use.
     import pickle
-    from analysis import load_sample_data, _resolve_sample_dir
+    from diffusion.analysis.analysis import load_sample_data, _resolve_sample_dir
 
-    results_dir = Path('diffusion/results')
-    version = 'V1'
+    results_root = Path('diffusion/results')
+    version = 'V7'
+    run_id = '20260218_212954'
     sample_idx = 0
-    sampler_type = 'ddim'
+    sampler_type = 'ddpm'
     n_bands = 4
     threshold = 0.10
 
+    results_dir = results_root / version
+    run_version = run_id
+
     sample_dir, detected_sampler = _resolve_sample_dir(
-        results_dir, version, sample_idx, sampler_type=sampler_type
+        results_dir, run_version, sample_idx, sampler_type=sampler_type
     )
     data = load_sample_data(
-        results_dir, version, sample_idx,
+        results_dir, run_version, sample_idx,
         sample_dir=sample_dir,
         sampler_type=detected_sampler,
     )

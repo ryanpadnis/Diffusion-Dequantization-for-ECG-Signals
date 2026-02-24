@@ -29,8 +29,8 @@ import numpy as np
 import pickle
 import torch
 
-from data.preprocess.transform import get_transform
-from data.preprocess.quantize import UniformQuantizer, compute_range_from_tensor
+from data.utils.transforms import get_transform
+from data.utils.quantizers import UniformQuantizer, compute_range_from_tensor
 
 
 def _lowpass_fft(x: torch.Tensor, *, cutoff_hz: float, sample_rate_hz: float) -> torch.Tensor:
@@ -1735,22 +1735,23 @@ def load_sample_data(
 
     q4_path = _first_existing_path(
         sample_dir,
-        ['condition_4bit_time.pt', 'quantized_signal.pt', 'quantized_signal_4bit.pt', 'condition_4bit.pt', 'q4.pt'],
+        ['cond_time_4bit.pt', 'condition_4bit_time.pt', 'quantized_signal.pt', 'quantized_signal_4bit.pt', 'condition_4bit.pt', 'q4.pt'],
     )
     if q4_path is not None:
         data['4bit'] = _extract_tensor(
             torch.load(q4_path, map_location='cpu'),
-            key_candidates=['time_domain_4bit', 'quantized_signal_4bit', 'condition_signal_4bit', 'signal_4bit', 'x'],
+            key_candidates=['cond_time_4bit', 'time_domain_4bit', 'quantized_signal_4bit', 'condition_signal_4bit', 'signal_4bit', 'x'],
         )
 
     gt_path = _first_existing_path(
         sample_dir,
-        ['ground_truth_16bit_time.pt', 'ground_truth_signal.pt', 'ground_truth.pt', 'gt.pt', 'target.pt'],
+        ['target_time.pt', 'ground_truth_16bit_time.pt', 'ground_truth_signal.pt', 'ground_truth.pt', 'gt.pt', 'target.pt'],
     )
     if gt_path is not None:
         data['16bit_gt'] = _extract_tensor(
             torch.load(gt_path, map_location='cpu'),
             key_candidates=[
+                'target_time',
                 'time_domain_16bit',
                 'ground_truth_signal_16bit',
                 'ground_truth_signal',
@@ -3326,6 +3327,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--compare",
         action="store_true",
+        default=True,
         help="Write only the generated vs 4-bit vs target comparisons: raw spectrogram mag/phase, time-domain, plus a metrics JSON with pre/post MSEs. Avoids any re-inversion of sampler outputs.",
     )
     p.add_argument(
@@ -3453,6 +3455,8 @@ def main() -> None:
 
     config: dict = {}
     config_path = results_dir / version / 'config.pkl'
+    if not config_path.exists():
+        config_path = results_dir / 'config.pkl'
     if config_path.exists():
         with open(config_path, 'rb') as f:
             config = pickle.load(f)

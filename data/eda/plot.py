@@ -22,7 +22,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
-from data.util import settings
+from data.utils import settings
 
 
 def compute_spectral_energy_db(spectrogram):
