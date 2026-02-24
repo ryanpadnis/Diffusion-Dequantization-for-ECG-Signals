@@ -4,7 +4,7 @@ import argparse
 import torch
 from pathlib import Path
 from tqdm import tqdm
-from data import settings
+from data.utils import settings
 
 
 def _iter_normalized_pts(normalized_dir: Path) -> list[Path]:

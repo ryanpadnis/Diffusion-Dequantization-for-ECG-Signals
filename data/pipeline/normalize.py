@@ -6,7 +6,7 @@ import torch
 import pandas as pd
 from pathlib import Path
 from tqdm import tqdm
-from data import settings
+from data.utils import settings
 
 
 SUPPORTED_LEADS = ["MLII", "V5", "V2", "V1"]

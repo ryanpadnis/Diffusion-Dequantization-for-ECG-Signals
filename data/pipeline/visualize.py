@@ -4,7 +4,7 @@ import torch
 import matplotlib.pyplot as plt
 from pathlib import Path
 import argparse
-from data import settings
+from data.utils import settings
 
 
 def load_first_chunks(chunks_dir: Path):

@@ -8,7 +8,7 @@ from transform import *
 from quantize import *
 from tqdm import tqdm
 from typing import List
-from data import settings
+from data.util import settings
 
 # Local variables
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")

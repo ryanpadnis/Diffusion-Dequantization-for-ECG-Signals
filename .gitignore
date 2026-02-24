@@ -214,20 +214,16 @@ data/processed/chunks/
 data/plots/
 data/models/
 data/results/
-data/data/raw/
-data/data/processed/chunks/
-data/data/plots/
-data/data/models/
-data/data/results/
-data/data/interim/
 data/interim/
 data/processed/
+data/data/
 
 #general
 *.pt
 *.parquet
 *.npy
 *.npz   
+*.json
 
 # Figures / images
 *.png

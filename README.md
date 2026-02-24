@@ -41,14 +41,21 @@ uv run python data/preprocess/process.py
 
 ## Data Pipeline
 
-1. **Download** (`uv run python data/load/download_kaggle_mitdb.py`) - Download VitalDB signals converted into CSVs from Kaggle
+1. **Download** (`uv run python data/pipeline/download.py`) - Download VitalDB signals converted into CSVs from Kaggle
    - Saves to `data/data/raw/mitdb_kaggle`
 
-2. **Chunk** (`v run python data/load/create_chunks.py`) - Split into 512-sample sequences
-   - Saves to `data/data/processed/arrhythmia_chunks.pt`
+2. **Normalize** (`uv run python data/pipeline/normalize.py`) - Normalizes signal by selected method for selected lead from each csv. 
+   - Saves to `data/data/processed/normalized` each as its own .pt
 
-3. **Process** (`data/preprocess/process.py`) - Quantize and compute STFT
-   - Saves to `data/data/processed/signals_{description}.pt`, etc. 
+3. **Chunk** (`uv run python data/pipeline/chunk.py`) - Split into 3600-sample (default, but can specify otherwise) sequences
+   - Saves to `data/data/processed/chunks`
+   - Can visualize these by running `uv run python data/pipeline/visualize.py`
+
+4. **Quantize** (`uv run python data/pipeline/quantize.py`) - Quantize by specified method
+   - Saves to `data/data/processed/quantized`
+
+5. **Transform** (`uv run python data/pipeline/transform.py`) - Perform specified transform on input quantized data
+   - Saves to `data/data/processed/transformed`
 
 ## Dependencies
 
