@@ -2,6 +2,7 @@
 
 import torch
 import pickle
+import math
 from pathlib import Path
 from typing import Optional
 from tqdm import tqdm
@@ -82,6 +83,84 @@ class DiffusionSampler:
             'real_bits': real_bits,
             'pipeline_config': (self.config.get('pipeline_config') or {}).copy(),
         }
+
+    def _maybe_pre_lowpass(self, raw_signals: torch.Tensor) -> torch.Tensor:
+        """Optionally low-pass raw signals to match training preprocessing."""
+        lp_cfg = self.config.get('pre_lowpass') if isinstance(self.config.get('pre_lowpass'), dict) else {}
+        lp_cutoff_hz = float(lp_cfg.get('cutoff_hz', 0.0) or 0.0)
+        lp_sample_rate_hz = float(lp_cfg.get('sample_rate_hz', 0.0) or 0.0)
+        lp_enabled = bool(lp_cfg.get('enabled', False)) and lp_cutoff_hz > 0 and lp_sample_rate_hz > 0
+        if not lp_enabled:
+            return raw_signals
+
+        x = raw_signals.detach().to(torch.float32)
+        n = int(x.shape[-1])
+        cutoff = min(float(lp_cutoff_hz), 0.5 * float(lp_sample_rate_hz))
+        X = torch.fft.rfft(x, dim=-1)
+        freqs = torch.fft.rfftfreq(n, d=1.0 / float(lp_sample_rate_hz)).to(X.device)
+        mask = (freqs <= cutoff).to(X.dtype)
+        return torch.fft.irfft(X * mask, n=n, dim=-1).to(torch.float32)
+
+    def _compute_target_spec_norm(
+        self,
+        raw_signals: torch.Tensor,
+        *,
+        params: dict,
+        cond_min: torch.Tensor,
+        cond_denom: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Compute target spectrogram in the *training-normalized* space.
+
+        Training normalizes real magnitudes using ONLY condition-derived stats.
+        This reproduces that so pre-inversion MSEs are apples-to-apples.
+        """
+        from data.preprocess.transform import get_transform
+
+        raw_signals = self._maybe_pre_lowpass(raw_signals)
+
+        pipeline_config = params['pipeline_config'].copy()
+        transform_type = pipeline_config.pop('transform', 'stft')
+        transform = get_transform(transform_type, **pipeline_config, device=self.device)
+
+        mag = transform.apply(raw_signals.to(self.device))
+        phase = getattr(transform, 'phase', None)
+
+        if mag.ndim == 3:
+            mag = mag.unsqueeze(1)
+        mag = mag.to(torch.float32)
+
+        mag_norm_mode = str(self.config.get('mag_norm_mode', 'minmax') or 'minmax').strip().lower()
+        if mag_norm_mode in {'none', 'off', 'identity'}:
+            # No normalization — pass raw magnitude through; denorm is identity
+            norm = mag
+            norm = torch.clamp(norm, min=0.0)  # magnitudes stay non-negative
+        elif mag_norm_mode in {'zscore', 'z_score', 'standardize'}:
+            # cond_min holds mean, cond_denom holds std * clamp_sigma
+            cmin = cond_min.to(torch.float32)
+            denom = cond_denom.to(torch.float32)
+            norm = (mag - cmin) / denom
+            norm = torch.clamp(norm, -1.0, 1.0)
+        elif mag_norm_mode in {'absmax', 'peak', 'max'}:
+            denom = cond_denom.to(torch.float32)
+            norm = mag / denom
+            norm = norm * 2.0 - 1.0
+            norm = torch.clamp(norm, -1.0, 1.0)
+        else:
+            cmin = cond_min.to(torch.float32)
+            denom = cond_denom.to(torch.float32)
+            norm = (mag - cmin) / denom
+            norm = norm * 2.0 - 1.0
+            norm = torch.clamp(norm, -1.0, 1.0)
+
+        if phase is None:
+            return norm, None
+
+        # Phase normalized to [-1,1] (angle/pi) matches training when use_phase_channel=True.
+        ph = phase.to(torch.float32)
+        if ph.ndim == 3:
+            ph = ph.unsqueeze(1)
+        ph_norm = torch.clamp(ph / math.pi, -1.0, 1.0)
+        return norm, ph_norm
     
     def preprocess_condition(self, raw_signals: torch.Tensor, params: dict, *, debug_quant: bool = False) -> torch.Tensor:
         """Preprocess condition: time-quantize -> STFT magnitude -> normalize to [-1, 1].
@@ -92,6 +171,9 @@ class DiffusionSampler:
         """
         from data.preprocess.transform import get_transform
         from data.preprocess.quantize import UniformQuantizer
+
+        # Optional: time-domain low-pass (must match training if enabled).
+        raw_signals = self._maybe_pre_lowpass(raw_signals)
 
         cond_bits = int(params['cond_bits']) #use the conditional data bit sizew
 
@@ -141,19 +223,70 @@ class DiffusionSampler:
         if mag.ndim == 3:
             mag = mag.unsqueeze(1)  # [B, F, T] -> [B, 1, F, T]
 
-        # Per-sample normalization (matches diffusion/utils/runner.py)
-        cond_min = mag.amin(dim=(2, 3), keepdim=True)
-        cond_max = mag.amax(dim=(2, 3), keepdim=True)
-        denom = cond_max - cond_min
-        denom = torch.where(denom.abs() < 1e-8, torch.ones_like(denom), denom)
+        use_phase_channel = bool(self.config.get('use_phase_channel', False))
+        if use_phase_channel:
+            if phase is None:
+                raise ValueError("use_phase_channel=True requires a transform that exposes `phase` (e.g. STFT/DFT).")
+            if phase.ndim == 3:
+                phase_ch = phase.unsqueeze(1)  # [B, F, T] -> [B, 1, F, T]
+            elif phase.ndim == 4 and phase.shape[1] == 1:
+                phase_ch = phase
+            else:
+                raise ValueError(f"Unexpected phase shape for phase channel: {tuple(phase.shape)}")
 
-        normalized = (mag - cond_min) / denom
-        normalized = normalized * 2.0 - 1.0
-        normalized = torch.clamp(normalized, -1.0, 1.0)
+            # Normalize phase to [-1, 1] by dividing by pi.
+            phase_norm = torch.clamp(phase_ch.to(torch.float32) / math.pi, -1.0, 1.0)
+
+        # Per-sample normalization (must match diffusion/utils/runner.py)
+        mag_norm_mode = str(self.config.get('mag_norm_mode', 'minmax') or 'minmax').strip().lower()
+        mag_norm_eps = float(self.config.get('mag_norm_epsilon', 1e-8) or 1e-8)
+        if mag_norm_eps <= 0:
+            mag_norm_eps = 1e-8
+
+        if mag_norm_mode in {'zscore', 'z_score', 'standardize'}:
+            mag_norm_mode = 'zscore'
+            clamp_sigma = float(self.config.get('mag_norm_clamp_sigma', 3.0) or 3.0)
+            if clamp_sigma <= 0:
+                clamp_sigma = 3.0
+            cond_mean = mag.mean(dim=(2, 3), keepdim=True)
+            cond_std = mag.std(dim=(2, 3), keepdim=True, unbiased=False)
+            denom = cond_std * clamp_sigma
+            denom = torch.where(denom.abs() < mag_norm_eps, torch.ones_like(denom), denom)
+            cond_min = cond_mean  # store mean as offset for denorm
+
+            normalized = (mag - cond_mean) / denom
+            normalized = torch.clamp(normalized, -1.0, 1.0)
+        elif mag_norm_mode in {'absmax', 'peak', 'max'}:
+            mag_norm_mode = 'absmax'
+            # Magnitudes are non-negative: use peak as scale and ignore min.
+            cond_peak = mag.amax(dim=(2, 3), keepdim=True)
+            denom = torch.where(cond_peak.abs() < mag_norm_eps, torch.ones_like(cond_peak), cond_peak)
+            cond_min = torch.zeros_like(denom)
+            normalized = mag / denom
+            normalized = normalized * 2.0 - 1.0
+            normalized = torch.clamp(normalized, -1.0, 1.0)
+        elif mag_norm_mode in {'none', 'off', 'identity'}:
+            mag_norm_mode = 'none'
+            # Identity: no normalization — pass raw magnitude through (denom=1, min=0)
+            cond_min = torch.zeros(mag.shape[0], 1, 1, 1, dtype=mag.dtype, device=mag.device)
+            denom = torch.ones_like(cond_min)
+            normalized = mag  # no transform; magnitudes are already non-negative
+        else:
+            mag_norm_mode = 'minmax'
+            # Default: min/max range.
+            cond_min = mag.amin(dim=(2, 3), keepdim=True)
+            cond_max = mag.amax(dim=(2, 3), keepdim=True)
+            denom = cond_max - cond_min
+            denom = torch.where(denom.abs() < mag_norm_eps, torch.ones_like(denom), denom)
+
+            normalized = (mag - cond_min) / denom
+            normalized = normalized * 2.0 - 1.0
+            normalized = torch.clamp(normalized, -1.0, 1.0)
 
         # Save for postprocess inversion.
         self._last_cond_min = cond_min.detach().clone()
         self._last_cond_denom = denom.detach().clone()
+        self._last_cond_norm_mode = mag_norm_mode
 
         print(
             f"  Preprocess condition - shape: {normalized.shape}, dtype: {normalized.dtype}, "
@@ -165,6 +298,9 @@ class DiffusionSampler:
             cx0 = float((cond_min[0] + denom[0]).item())
             d0 = float(denom[0].item())
             print(f"  [Sampler] Per-sample cond_mag range (sample_0): min={cm0:.6g} max={cx0:.6g} denom={d0:.6g}")
+        if use_phase_channel:
+            # Only magnitude uses cond_min/denom. Phase stays angle/pi in [-1,1].
+            normalized = torch.cat([normalized.to(torch.float32), phase_norm.to(torch.float32)], dim=1)
         return normalized
 
     def _rescale_norm_to_unit_range(self, x: torch.Tensor) -> torch.Tensor:
@@ -191,48 +327,63 @@ class DiffusionSampler:
         self,
         generated: torch.Tensor,
         condition_phase: Optional[torch.Tensor],
+        condition_mag_norm: Optional[torch.Tensor],
         params: dict,
         *,
         cond_min: torch.Tensor | None = None,
         cond_denom: torch.Tensor | None = None,
         input_length: int | None = None,
         return_denormalized: bool = False,
-        rescale_to_unit_range: bool = True,
     ) -> torch.Tensor:
         """Denormalize generated transform coefficients and invert to time domain.
 
-        If cond_min/cond_denom are provided, uses per-sample inversion matching training.
-        Otherwise falls back to global range inversion (legacy behavior).
+        Denormalization is a simple scale: out * cond_denom + cond_min.
+        No unit-range rescaling is applied — the model is trained on [0,1] data
+        and its output is directly on the condition's magnitude scale.
         """
         from data.preprocess.transform import get_transform
 
         pipeline_config = params['pipeline_config'].copy()
-        transform_type = pipeline_config.get('transform', 'stft')
-        magnitude_only = str(transform_type).lower() in {'stft', 'dft'}
+        transform_type = str(pipeline_config.get('transform', 'stft')).lower()
+        magnitude_only = transform_type in {'stft', 'dft'}
+        requires_phase = transform_type in {'stft', 'dft'}
+
+        use_phase_channel = bool(self.config.get('use_phase_channel', False))
 
         # Inference may run in bf16/fp16. Convert to float32 for stable inversion.
         generated = generated.to(torch.float32)
 
-        # Default behavior: rescale diffusion output to fill [-1, 1] per-sample.
-        # This preserves relative structure while enforcing the expected normalized range
-        # for denormalization using per-sample conditioning stats.
-        if bool(rescale_to_unit_range):
-            generated = self._rescale_norm_to_unit_range(generated)
+        # Split channels when phase is present.
+        if use_phase_channel:
+            if generated.ndim != 4 or generated.shape[1] < 2:
+                raise ValueError(f"use_phase_channel=True expects generated [B,2,H,W], got {tuple(generated.shape)}")
+            generated_mag = generated[:, :1]
+            generated_phase_norm = torch.clamp(generated[:, 1:2], -1.0, 1.0)
+        else:
+            generated_mag = generated
+            generated_phase_norm = None
         
+        _norm_mode = str(getattr(self, '_last_cond_norm_mode', self.config.get('mag_norm_mode', 'minmax')) or 'minmax').strip().lower()
         if (cond_min is not None) and (cond_denom is not None):
             cond_min = cond_min.to(torch.float32)
             cond_denom = cond_denom.to(torch.float32)
-            denormalized = (generated + 1.0) / 2.0
-            denormalized = denormalized * cond_denom + cond_min
+            if _norm_mode in {'zscore', 'z_score', 'standardize'}:
+                # zscore denorm: x * (std * clamp_sigma) + mean
+                denormalized = generated_mag * cond_denom + cond_min
+            elif _norm_mode in {'none', 'off', 'identity'}:
+                # identity: denom=1, min=0 → x * 1 + 0 = x
+                denormalized = generated_mag
+            else:
+                # minmax / absmax denorm: (x + 1) / 2 * range + min
+                denormalized = (generated_mag + 1.0) / 2.0
+                denormalized = denormalized * cond_denom + cond_min
             if magnitude_only:
-                # Magnitudes must be non-negative; also cap to the conditioning max.
-                cond_max = cond_min + cond_denom
+                # Magnitudes must be non-negative.
                 denormalized = torch.clamp(denormalized, min=0.0)
-                denormalized = torch.minimum(denormalized, cond_max)
         else:
             rmin = float(params['cond_mag_min'])
             rmax = float(params['cond_mag_max'])
-            denormalized = (generated + 1.0) / 2.0
+            denormalized = (generated_mag + 1.0) / 2.0
             denormalized = denormalized * (float(rmax) - float(rmin)) + float(rmin)
             if magnitude_only:
                 denormalized = torch.clamp(denormalized, min=0.0, max=max(float(rmax), 0.0))
@@ -240,6 +391,87 @@ class DiffusionSampler:
         
         if denormalized.ndim == 4 and denormalized.shape[1] == 1:
             denormalized = denormalized.squeeze(1)
+
+        # Optional: magnitude energy matching (condition-only, no target lookahead).
+        # This applies a single scalar so generated mag energy matches condition mag energy.
+        self._last_mag_energy_match_factor = None
+        em_cfg = self.config.get('mag_energy_match') if isinstance(self.config.get('mag_energy_match'), dict) else {}
+        em_enabled = bool(em_cfg.get('enabled', False))
+        if em_enabled and (cond_min is not None) and (cond_denom is not None) and torch.is_tensor(condition_mag_norm):
+            try:
+                method = str(em_cfg.get('method', 'l2') or 'l2').strip().lower()
+                clamp_min = float(em_cfg.get('clamp_min', 0.25) or 0.25)
+                clamp_max = float(em_cfg.get('clamp_max', 4.0) or 4.0)
+                eps = float(em_cfg.get('eps', 1e-8) or 1e-8)
+
+                cmag = condition_mag_norm.detach().to(torch.float32)
+                while cmag.ndim > 4:
+                    cmag = cmag.squeeze(1)
+                if cmag.ndim == 4 and cmag.shape[1] >= 2:
+                    cmag = cmag[:, :1]
+                if cmag.ndim == 4 and cmag.shape[1] == 1:
+                    cmag = cmag.squeeze(1)  # [B,F,T]
+                if cmag.ndim == 3 and cmag.shape[0] == 1:
+                    cmag = cmag[0]
+
+                # Denormalize condition magnitude using the same cond_min/cond_denom.
+                cmin = cond_min.detach().to(torch.float32)
+                cden = cond_denom.detach().to(torch.float32)
+                while cmin.ndim > 4:
+                    cmin = cmin.squeeze(1)
+                while cden.ndim > 4:
+                    cden = cden.squeeze(1)
+                if cmin.ndim == 4 and cmin.shape[1] == 1:
+                    cmin = cmin.squeeze(1)
+                if cden.ndim == 4 and cden.shape[1] == 1:
+                    cden = cden.squeeze(1)
+                if cmin.ndim == 3 and cmin.shape[0] == 1:
+                    cmin = cmin[0]
+                if cden.ndim == 3 and cden.shape[0] == 1:
+                    cden = cden[0]
+
+                if _norm_mode in {'zscore', 'z_score', 'standardize'}:
+                    cond_mag_denorm = cmag * cden + cmin
+                elif _norm_mode in {'none', 'off', 'identity'}:
+                    cond_mag_denorm = cmag  # identity: raw mag, no denorm needed
+                else:
+                    cond_mag_denorm = (cmag + 1.0) / 2.0
+                    cond_mag_denorm = cond_mag_denorm * cden + cmin
+                cond_mag_denorm = torch.clamp(cond_mag_denorm, min=0.0)
+
+                gen_mag = denormalized.detach().to(torch.float32)
+                # Align shapes
+                f = min(int(cond_mag_denorm.shape[-2]), int(gen_mag.shape[-2]))
+                t = min(int(cond_mag_denorm.shape[-1]), int(gen_mag.shape[-1]))
+                cond_mag_denorm = cond_mag_denorm[..., :f, :t]
+                gen_mag = gen_mag[..., :f, :t]
+
+                if method in {'p95', 'quantile95'}:
+                    cstat = torch.quantile(cond_mag_denorm.reshape(-1), 0.95)
+                    gstat = torch.quantile(gen_mag.reshape(-1), 0.95)
+                    scale = float((cstat / (gstat + eps)).item())
+                else:
+                    # default: L2 energy match (Frobenius norm)
+                    cE = torch.mean(cond_mag_denorm * cond_mag_denorm)
+                    gE = torch.mean(gen_mag * gen_mag)
+                    scale = float(torch.sqrt(cE / (gE + eps)).item())
+
+                if not math.isfinite(scale):
+                    scale = 1.0
+                scale = max(clamp_min, min(clamp_max, scale))
+
+                denormalized = denormalized * float(scale)
+                if magnitude_only and (cond_min is not None) and (cond_denom is not None):
+                    # Keep magnitudes non-negative; allow >cond_max if scale>1, but avoid NaNs.
+                    denormalized = torch.clamp(denormalized, min=0.0)
+                self._last_mag_energy_match_factor = float(scale)
+            except Exception:
+                self._last_mag_energy_match_factor = None
+
+        predicted_phase = None
+        if use_phase_channel:
+            # phase in radians in [-pi, pi]
+            predicted_phase = (generated_phase_norm.squeeze(1) * math.pi).to(torch.float32)
         
         # Inverse transform back to time domain
         transform_type = pipeline_config.pop('transform', 'stft')
@@ -250,11 +482,28 @@ class DiffusionSampler:
             device=self.device
         )
 
-        # Some transforms (e.g. STFT) require phase/state to invert.
-        if hasattr(transform, 'phase'):
-            if condition_phase is None:
-                raise ValueError(f"Transform '{transform_type}' requires condition_phase for inversion")
-            phase = condition_phase
+        # Some transforms (e.g. STFT/DFT) require phase/state to invert.
+        if requires_phase:
+            inv_src = str(self.config.get('phase_inversion_source', 'auto') or 'auto').strip().lower()
+            if inv_src not in {'auto', 'predicted', 'condition'}:
+                inv_src = 'auto'
+
+            if inv_src == 'condition':
+                if condition_phase is None:
+                    raise ValueError(f"Transform '{transform_type}' requires condition_phase for inversion (phase_inversion_source='condition')")
+                phase = condition_phase
+            elif inv_src == 'predicted':
+                if predicted_phase is None:
+                    raise ValueError("phase_inversion_source='predicted' but no predicted phase is available (use_phase_channel must be enabled).")
+                phase = predicted_phase
+            else:
+                # auto
+                if predicted_phase is not None:
+                    phase = predicted_phase
+                else:
+                    if condition_phase is None:
+                        raise ValueError(f"Transform '{transform_type}' requires condition_phase for inversion")
+                    phase = condition_phase
             if phase.ndim == 4 and phase.shape[1] == 1:
                 phase = phase.squeeze(1)
             transform.phase = phase.to(self.device)
@@ -283,6 +532,8 @@ class DiffusionSampler:
 
         time_out = time_signals.cpu()
         if bool(return_denormalized):
+            if predicted_phase is not None:
+                return time_out, denormalized.detach().cpu(), predicted_phase.detach().cpu()
             return time_out, denormalized.detach().cpu()
         return time_out
 
@@ -303,14 +554,14 @@ class DiffusionSampler:
         """Run diffusion denoising to sample multiple trajectories for a single condition.
 
         Args:
-            condition_spec: [1, 1, H, W] normalized condition spectrogram.
+            condition_spec: [1, C, H, W] normalized condition spectrogram.
             trajectory_indices: List of trajectory ids (used for deterministic seeds).
             num_inference_steps: Number of denoising steps.
             use_ddim: Whether to use DDIM when model scheduler is DDPM.
             H, W: Spatial shape.
 
         Returns:
-            Tensor of shape [len(trajectory_indices), 1, H, W]
+            Tensor of shape [len(trajectory_indices), C, H, W]
         """
         if not trajectory_indices:
             raise ValueError("trajectory_indices must be non-empty")
@@ -337,28 +588,59 @@ class DiffusionSampler:
             if progress_params is None:
                 return
 
-            # Save spectrograms as a single tensor: [B, 1, H, W]
+            # Save spectrograms as a single tensor: [B, C, H, W]
             specs_norm = image_batch.detach().to('cpu').to(torch.float32)
+
+            use_phase_channel = bool(self.config.get('use_phase_channel', False)) and specs_norm.ndim == 4 and specs_norm.shape[1] >= 2
 
             # Denormalize using per-sample normalization when available.
             snap_pipeline_config = (progress_params.get('pipeline_config') or {}).copy()
             snap_transform_type = snap_pipeline_config.get('transform', 'stft')
             snap_magnitude_only = str(snap_transform_type).lower() in {'stft', 'dft'}
 
-            if ('cond_min' in progress_params) and ('cond_denom' in progress_params):
-                cmin = progress_params['cond_min'].to(torch.float32)
-                cden = progress_params['cond_denom'].to(torch.float32)
-                specs_denorm = (specs_norm + 1.0) / 2.0
-                specs_denorm = specs_denorm * cden + cmin
-                if snap_magnitude_only:
-                    specs_denorm = torch.clamp(specs_denorm, min=0.0)
+            if use_phase_channel:
+                specs_mag = specs_norm[:, :1]
+                specs_phase_norm = torch.clamp(specs_norm[:, 1:2], -1.0, 1.0)
+
+                if ('cond_min' in progress_params) and ('cond_denom' in progress_params):
+                    cmin = progress_params['cond_min'].to(torch.float32)
+                    cden = progress_params['cond_denom'].to(torch.float32)
+                    _snap_mode = str(self.config.get('mag_norm_mode', 'minmax') or 'minmax').strip().lower()
+                    if _snap_mode in {'zscore', 'z_score', 'standardize'}:
+                        specs_denorm_mag = specs_mag * cden + cmin
+                    else:
+                        specs_denorm_mag = (specs_mag + 1.0) / 2.0
+                        specs_denorm_mag = specs_denorm_mag * cden + cmin
+                    if snap_magnitude_only:
+                        specs_denorm_mag = torch.clamp(specs_denorm_mag, min=0.0)
+                else:
+                    rmin = float(progress_params.get('cond_mag_min', 0.0))
+                    rmax = float(progress_params.get('cond_mag_max', 1.0))
+                    specs_denorm_mag = (specs_mag + 1.0) / 2.0
+                    specs_denorm_mag = specs_denorm_mag * (float(rmax) - float(rmin)) + float(rmin)
+                    if snap_magnitude_only:
+                        specs_denorm_mag = torch.clamp(specs_denorm_mag, min=0.0)
+
+                specs_denorm_phase = specs_phase_norm * math.pi
             else:
-                rmin = float(progress_params.get('cond_mag_min', 0.0))
-                rmax = float(progress_params.get('cond_mag_max', 1.0))
-                specs_denorm = (specs_norm + 1.0) / 2.0
-                specs_denorm = specs_denorm * (float(rmax) - float(rmin)) + float(rmin)
-                if snap_magnitude_only:
-                    specs_denorm = torch.clamp(specs_denorm, min=0.0)
+                if ('cond_min' in progress_params) and ('cond_denom' in progress_params):
+                    cmin = progress_params['cond_min'].to(torch.float32)
+                    cden = progress_params['cond_denom'].to(torch.float32)
+                    _snap_mode = str(self.config.get('mag_norm_mode', 'minmax') or 'minmax').strip().lower()
+                    if _snap_mode in {'zscore', 'z_score', 'standardize'}:
+                        specs_denorm = specs_norm * cden + cmin
+                    else:
+                        specs_denorm = (specs_norm + 1.0) / 2.0
+                        specs_denorm = specs_denorm * cden + cmin
+                    if snap_magnitude_only:
+                        specs_denorm = torch.clamp(specs_denorm, min=0.0)
+                else:
+                    rmin = float(progress_params.get('cond_mag_min', 0.0))
+                    rmax = float(progress_params.get('cond_mag_max', 1.0))
+                    specs_denorm = (specs_norm + 1.0) / 2.0
+                    specs_denorm = specs_denorm * (float(rmax) - float(rmin)) + float(rmin)
+                    if snap_magnitude_only:
+                        specs_denorm = torch.clamp(specs_denorm, min=0.0)
 
             # Also save phase-based inversion for each trajectory.
             # (Loop is fine; this is debug/analysis output.)
@@ -368,6 +650,7 @@ class DiffusionSampler:
                 gen_time = self.postprocess_generated(
                     gen_spec,
                     condition_phase=progress_condition_phase,
+                    condition_mag_norm=None,
                     params=progress_params,
                     cond_min=progress_params.get('cond_min'),
                     cond_denom=progress_params.get('cond_denom'),
@@ -383,8 +666,11 @@ class DiffusionSampler:
                     'step_idx': int(step_idx),
                     'timestep': int(t_val),
                     'trajectory_indices': [int(i) for i in trajectory_indices],
-                    'spectrograms_16bit': specs_denorm.to(torch.float32),
+                    # Backwards-compatible key (historically magnitude-only).
+                    'spectrograms_16bit': (specs_denorm_mag.to(torch.float32) if use_phase_channel else specs_denorm.to(torch.float32)),
                     'spectrograms_16bit_norm': specs_norm.to(torch.float32),
+                    'spectrograms_denorm_mag': (specs_denorm_mag.to(torch.float32) if use_phase_channel else None),
+                    'spectrograms_denorm_phase': (specs_denorm_phase.to(torch.float32) if use_phase_channel else None),
                     'time_domain': time_batch.to(torch.float32),
                 },
                 out_path,
@@ -392,10 +678,11 @@ class DiffusionSampler:
 
         with torch.no_grad():
             all_noise = []
+            C = int(condition_spec.shape[1])
             for traj_idx in trajectory_indices:
                 generator = torch.Generator(device=self.device).manual_seed(int(traj_idx))
                 noise = torch.randn(
-                    (1, 1, H, W),
+                    (1, C, H, W),
                     device=self.device,
                     generator=generator,
                     dtype=model_dtype,
@@ -505,11 +792,21 @@ class DiffusionSampler:
                 cond_spec = cond_spec.to(self.device)
                 torch.save({'condition_spec_4bit': cond_spec.cpu()}, sample_dir / 'condition_spec.pt')
 
+                # Save explicit time baselines to make downstream comparisons unambiguous.
+                # - target_time: the (optionally pre-lowpassed) raw waveform
+                # - cond_time_4bit: the quantized condition waveform used to form cond_spec
+                try:
+                    target_time = self._maybe_pre_lowpass(raw_sig).detach().cpu().to(torch.float32)
+                except Exception:
+                    target_time = raw_sig.detach().cpu().to(torch.float32)
+                torch.save({'target_time': target_time}, sample_dir / 'target_time.pt')
+
                 # Condition 4-bit waveform (used for time-domain scaling without lookahead).
                 wave_4bit = getattr(self, '_last_wave_4bit', None)
                 if wave_4bit is None:
                     wave_4bit = raw_sig.to(self.device)
                 batch_cond_waves_4bit.append(wave_4bit.detach().cpu().to(torch.float32))
+                torch.save({'cond_time_4bit': wave_4bit.detach().cpu().to(torch.float32)}, sample_dir / 'cond_time_4bit.pt')
                 
                 batch_cond_specs.append(cond_spec)
                 # self._last_phase is set by preprocess_condition side-effect
@@ -520,6 +817,21 @@ class DiffusionSampler:
                 batch_cond_mins.append(getattr(self, '_last_cond_min').clone())
                 batch_cond_denoms.append(getattr(self, '_last_cond_denom').clone())
                 batch_input_lengths.append(int(getattr(self, '_last_input_length')))
+
+                # Save target spectrogram in training-normalized space (and phase if available).
+                try:
+                    tgt_mag_norm, tgt_phase_norm = self._compute_target_spec_norm(
+                        raw_sig,
+                        params=params_i,
+                        cond_min=batch_cond_mins[-1],
+                        cond_denom=batch_cond_denoms[-1],
+                    )
+                    payload = {'target_spec_norm': tgt_mag_norm.detach().cpu().to(torch.float32)}
+                    if tgt_phase_norm is not None:
+                        payload['target_phase_norm'] = tgt_phase_norm.detach().cpu().to(torch.float32)
+                    torch.save(payload, sample_dir / 'target_spec.pt')
+                except Exception as e:
+                    print(f"[Sampler] Warning: failed saving target_spec for sample_{idx} (non-fatal): {e}")
 
             # Stack conditions: [Batch, 1, H, W]
             cond_batch_stacked = torch.cat(batch_cond_specs, dim=0)
@@ -556,6 +868,7 @@ class DiffusionSampler:
             # Generate Noise
             # We need deterministic seeds per trajectory.
             all_noise = []
+            C = int(inference_batch.shape[1])
             for k in range(len(inference_batch)):
                 # seed = (global_sample_idx * 1000) + traj_idx
                 sample_local_idx = k // num_trajectories
@@ -564,7 +877,7 @@ class DiffusionSampler:
                 seed = (global_sample_idx * 1000) + traj_idx
                 
                 gen = torch.Generator(device=self.device).manual_seed(seed)
-                noise = torch.randn((1, 1, H, W), device=self.device, generator=gen, dtype=model_dtype)
+                noise = torch.randn((1, C, H, W), device=self.device, generator=gen, dtype=model_dtype)
                 all_noise.append(noise)
             
             image = torch.cat(all_noise, dim=0)
@@ -607,89 +920,109 @@ class DiffusionSampler:
                 sample_gen_specs = generated_batch[start_k:end_k] # [T, 1, H, W]
                 
                 trajectories_spec = []
-                trajectories_spec_raw = []
                 trajectories_time = []
-                trajectories_time_raw = []
-                trajectories_time_from_rawspec = []
                 trajectories_mag_denorm = []
                 
                 for t_idx in range(num_trajectories):
-                    gen_spec_raw = sample_gen_specs[t_idx:t_idx+1]
-                    gen_spec = self._rescale_norm_to_unit_range(gen_spec_raw)
+                    gen_spec = sample_gen_specs[t_idx:t_idx+1]
 
-                    # Invert transform WITHOUT unit-range rescale of the diffusion output.
-                    # (This shows what happens if we take the raw diffusion normalized output as-is.)
-                    gen_time_from_rawspec, gen_mag_denorm_rawspec = self.postprocess_generated(
-                        gen_spec_raw,
-                        condition_phase=phase,
-                        params=params,
-                        cond_min=cond_min,
-                        cond_denom=cond_denom,
-                        input_length=input_len,
-                        return_denormalized=True,
-                        rescale_to_unit_range=False,
-                    )
-                    
-                    # Invert transform
-                    gen_time_raw, gen_mag_denorm = self.postprocess_generated(
+                    # Denormalize (multiply by condition scale) and invert to time domain.
+                    out = self.postprocess_generated(
                         gen_spec,
                         condition_phase=phase,
+                        condition_mag_norm=batch_cond_specs[i],
                         params=params,
                         cond_min=cond_min,
                         cond_denom=cond_denom,
                         input_length=input_len,
                         return_denormalized=True,
-                        rescale_to_unit_range=False,
                     )
 
-                    # Post-ISTFT scaling (condition-only, no lookahead):
-                    # scale generated waveform to match the CONDITION 4-bit waveform peak.
-                    eps = 1e-8
-                    target = batch_cond_waves_4bit[i].detach().cpu().to(torch.float32)
-                    tgt_peak = float(target.abs().max().item())
-                    gen_peak = float(gen_time_raw.abs().max().item())
-                    peak_scale = (tgt_peak / (gen_peak + eps)) if (tgt_peak > 0 and gen_peak > 0) else 1.0
-                    gen_time_scaled = gen_time_raw * float(peak_scale)
-                    
-                    trajectories_spec.append(gen_spec.cpu())
-                    trajectories_spec_raw.append(gen_spec_raw.detach().cpu().to(torch.float32))
-                    # Default saved output: scaled to match condition 4-bit peak.
-                    trajectories_time.append(gen_time_scaled.cpu())
-                    trajectories_time_raw.append(gen_time_raw.cpu())
-                    trajectories_time_from_rawspec.append(gen_time_from_rawspec.cpu())
-                    trajectories_mag_denorm.append(gen_mag_denorm.cpu())
+                    if isinstance(out, tuple) and len(out) == 3:
+                        gen_time, gen_mag_denorm, gen_phase_pred = out
+                    elif isinstance(out, tuple):
+                        gen_time, gen_mag_denorm = out
+                        gen_phase_pred = None
+                    else:
+                        gen_time = out
+                        gen_mag_denorm = None
+                        gen_phase_pred = None
+
+                    trajectories_spec.append(gen_spec.detach().cpu().to(torch.float32))
+                    trajectories_time.append(gen_time.cpu())
+                    trajectories_mag_denorm.append(
+                        gen_mag_denorm.detach().cpu().to(torch.float32)
+                        if gen_mag_denorm is not None
+                        else gen_spec.detach().cpu().to(torch.float32)
+                    )
                     
                     torch.save({
-                        # Historical naming kept: this is the *normalized* spectrogram output.
-                        'spectrogram_16bit': gen_spec.cpu(),
-                        # Pre-inversion diffusion output after unit-range rescale to [-1, 1].
                         'spectrogram_norm': gen_spec.detach().cpu().to(torch.float32),
-                        'spectrogram_norm_unitrange': gen_spec.detach().cpu().to(torch.float32),
-
-                        # Pre-inversion raw diffusion output (no unit-range rescale).
-                        'spectrogram_norm_raw': gen_spec_raw.detach().cpu().to(torch.float32),
-                        'spectrogram_norm_prerescale': gen_spec_raw.detach().cpu().to(torch.float32),
-                        'spectrogram_denorm_mag': gen_mag_denorm.detach().cpu().to(torch.float32),
-                        'spectrogram_denorm_mag_rawspec': gen_mag_denorm_rawspec.detach().cpu().to(torch.float32),
-
-                        # Time-domain reconstructions
-                        'time_domain': gen_time_scaled.cpu(),
-                        'time_domain_raw': gen_time_raw.cpu(),
-                        'time_domain_from_rawspec': gen_time_from_rawspec.cpu(),
-                        'time_rescale_peak_factor': float(peak_scale),
+                        'spectrogram_denorm_mag': gen_mag_denorm.detach().cpu().to(torch.float32) if gen_mag_denorm is not None else None,
+                        'spectrogram_denorm_phase': (gen_phase_pred.detach().cpu().to(torch.float32) if gen_phase_pred is not None else None),
+                        'time_domain': gen_time.cpu(),
+                        'mag_energy_match_factor': getattr(self, '_last_mag_energy_match_factor', None),
                     }, sample_dir / f'trajectory_{t_idx}.pt')
+
+                    # Save a tiny per-trajectory metrics JSON (pre/post inversion MSEs).
+                    # This intentionally uses ONLY condition-derived normalization for the spec MSEs.
+                    try:
+                        import json
+
+                        tgt_time = torch.load(sample_dir / 'target_time.pt', map_location='cpu')['target_time']
+                        cond_time = torch.load(sample_dir / 'cond_time_4bit.pt', map_location='cpu')['cond_time_4bit']
+                        tgt_spec_obj = torch.load(sample_dir / 'target_spec.pt', map_location='cpu')
+                        tgt_spec_norm = tgt_spec_obj.get('target_spec_norm')
+                        cond_spec_saved = torch.load(sample_dir / 'condition_spec.pt', map_location='cpu')['condition_spec_4bit']
+
+                        def _mse(a: torch.Tensor, b: torch.Tensor) -> float:
+                            a = a.detach().to(torch.float32)
+                            b = b.detach().to(torch.float32)
+                            # Align by min length/shape where applicable.
+                            if a.ndim == 2 and b.ndim == 2:
+                                n = min(a.shape[-1], b.shape[-1])
+                                return float(torch.mean((a[..., :n] - b[..., :n]) ** 2).item())
+                            if a.shape != b.shape:
+                                # Fallback: crop to min over each dim.
+                                mins = [min(int(sa), int(sb)) for sa, sb in zip(a.shape, b.shape)]
+                                slicer = tuple(slice(0, m) for m in mins)
+                                a = a[slicer]
+                                b = b[slicer]
+                            return float(torch.mean((a - b) ** 2).item())
+
+                        metrics = {
+                            'mse_time(cond4_vs_target)': _mse(cond_time, tgt_time),
+                            'mse_time(gen_vs_target)': _mse(gen_time.detach().cpu(), tgt_time),
+                        }
+
+                        if torch.is_tensor(tgt_spec_norm) and torch.is_tensor(cond_spec_saved):
+                            # Compare only magnitude channel if phase channel exists.
+                            if cond_spec_saved.ndim == 4 and cond_spec_saved.shape[1] >= 2:
+                                metrics['mse_spec_mag(cond4_vs_target)'] = _mse(cond_spec_saved[:, :1], tgt_spec_norm[:, :1])
+                            else:
+                                metrics['mse_spec_mag(cond4_vs_target)'] = _mse(cond_spec_saved, tgt_spec_norm)
+
+                        if torch.is_tensor(tgt_spec_norm):
+                            metrics['mse_spec_mag(gen_norm_vs_target)'] = _mse(gen_spec.detach().cpu().to(torch.float32), tgt_spec_norm)
+
+                        denom_pre = metrics.get('mse_spec_mag(cond4_vs_target)')
+                        if denom_pre is not None and denom_pre != 0 and 'mse_spec_mag(gen_norm_vs_target)' in metrics:
+                            metrics['improvement_pct_spec'] = float((denom_pre - metrics['mse_spec_mag(gen_norm_vs_target)']) / denom_pre * 100.0)
+
+                        denom_post = metrics.get('mse_time(cond4_vs_target)')
+                        if denom_post is not None and denom_post != 0:
+                            metrics['improvement_pct_time'] = float((denom_post - metrics['mse_time(gen_vs_target)']) / denom_post * 100.0)
+
+                        with open(sample_dir / f'metrics_traj_{t_idx}.json', 'w') as f:
+                            json.dump(metrics, f, indent=2, sort_keys=True)
+                    except Exception as e:
+                        print(f"[Sampler] Warning: failed writing metrics JSON for sample_{idx} traj_{t_idx} (non-fatal): {e}")
 
                 # Save all
                 torch.save({
-                    'spectrograms_16bit': torch.cat(trajectories_spec, dim=0),
-                    # Pre-inversion diffusion spectrograms
                     'spectrograms_norm': torch.cat(trajectories_spec, dim=0).to(torch.float32),
-                    'spectrograms_norm_unitrange': torch.cat(trajectories_spec, dim=0).to(torch.float32),
-                    'spectrograms_norm_raw': torch.cat(trajectories_spec_raw, dim=0),
-                    'time_domain': torch.cat(trajectories_time, dim=0),
-                    'time_domain_raw': torch.cat(trajectories_time_raw, dim=0),
-                    'time_domain_from_rawspec': torch.cat(trajectories_time_from_rawspec, dim=0),
                     'spectrograms_denorm_mag': torch.cat(trajectories_mag_denorm, dim=0).to(torch.float32),
+                    'time_domain': torch.cat(trajectories_time, dim=0),
                 }, sample_dir / 'all_trajectories.pt')
                 
                 results['conditions'].append(cond_batch_stacked[i].cpu())

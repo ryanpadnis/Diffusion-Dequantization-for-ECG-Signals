@@ -20,6 +20,9 @@ Usage Examples (copy/paste safe):
     # Download logs and samples only (skip all checkpoints)
     uv run python -m diffusion.aws.download_s3_artifacts --version V4 --run-id 20260213_202346 --no-checkpoints
 
+    # Download samples/ ONLY (fastest - just the generated .pt/.png files)
+    uv run python -m diffusion.aws.download_s3_artifacts --version V7 --run-id 20260218_2000313 --samples-only
+
     # Download specific run (keep in S3)
     uv run python -m diffusion.aws.download_s3_artifacts --s3 s3://YOUR_BUCKET/ee269project --region us-east-1 --version V4 --run-id 20260213_202346
 
@@ -137,6 +140,11 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Skip all checkpoints (only download logs and samples)",
     )
+    p.add_argument(
+        "--samples-only",
+        action="store_true",
+        help="Only download files under samples/ (skip checkpoints, logs, config, data cache)",
+    )
 
     return p.parse_args()
 
@@ -199,8 +207,11 @@ def _format_size(bytes: int) -> str:
     return f"{bytes:.2f} TB"
 
 
-def _should_download(key: str, best_only: bool, no_checkpoints: bool) -> bool:
+def _should_download(key: str, best_only: bool, no_checkpoints: bool, samples_only: bool = False) -> bool:
     """Check if a file should be downloaded based on filters."""
+    if samples_only:
+        return "/samples/" in key
+
     # Always download config.pkl
     if key.endswith("config.pkl"):
         return True
@@ -226,6 +237,7 @@ def _download_run(
     dry_run: bool = False,
     best_only: bool = False,
     no_checkpoints: bool = False,
+    samples_only: bool = False,
 ) -> tuple[List[str], List[str]]:
     """Download files for a run. Returns (downloaded_keys, all_keys_in_run)."""
     version = str(version or "V1").strip() or "V1"
@@ -242,6 +254,8 @@ def _download_run(
         print(f"  Filter: best_model.pt + logs + samples + config only")
     if no_checkpoints:
         print(f"  Filter: skipping all checkpoints")
+    if samples_only:
+        print(f"  Filter: samples/ only")
     
     paginator = s3_client.get_paginator("list_objects_v2")
     downloaded_keys = []
@@ -258,7 +272,7 @@ def _download_run(
     all_keys = [obj["Key"] for obj in all_objects]
     
     # Filter objects based on options
-    filtered_objects = [obj for obj in all_objects if _should_download(obj["Key"], best_only, no_checkpoints)]
+    filtered_objects = [obj for obj in all_objects if _should_download(obj["Key"], best_only, no_checkpoints, samples_only)]
     
     print(f"  Found {len(all_objects)} files total, downloading {len(filtered_objects)} files")
     
@@ -442,7 +456,8 @@ def main() -> None:
             s3_client, bucket, prefix, run_id, version, local_base,
             dry_run=args.dry_run,
             best_only=args.best_only,
-            no_checkpoints=args.no_checkpoints
+            no_checkpoints=args.no_checkpoints,
+            samples_only=args.samples_only,
         )
         all_downloaded_keys.extend(downloaded_keys)
         all_keys_to_delete.extend(all_run_keys)

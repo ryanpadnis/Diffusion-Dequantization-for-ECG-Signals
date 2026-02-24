@@ -8,6 +8,8 @@ import os
 from pathlib import Path
 from typing import Optional
 
+import math
+
 import io
 import tempfile
 
@@ -81,17 +83,55 @@ def _resolve_torch_dtype(config: dict, device: str) -> torch.dtype:
     return dtype
 
 
-def construct_train_filename(quantizer_type: str, transform_type: str, bits: int, cond: bool = False) -> str:
-    """Construct filename for processed training data based on parameters.
-    
-    Args:
-        quantizer_type: Type of quantizer (e.g., 'uniform')
-        transform_type: Type of transform (e.g., 'stft')
-        bits: Number of bits for quantization
-        cond: If True, use 'train_cond' prefix; otherwise use 'train_data'
-    """
+def _format_lowpass_tag(cutoff_hz: float, sample_rate_hz: float) -> str:
+    # Keep filenames stable + filesystem-friendly.
+    def _fmt(x: float) -> str:
+        if abs(x - round(x)) < 1e-9:
+            return str(int(round(x)))
+        s = f"{x:.6g}"
+        return s.replace('.', 'p')
+
+    return f"lp{_fmt(float(cutoff_hz))}hz_sr{_fmt(float(sample_rate_hz))}"
+
+
+def construct_train_filename(
+    quantizer_type: str,
+    transform_type: str,
+    bits: int,
+    cond: bool = False,
+    tag: Optional[str] = None,
+) -> str:
+    """Construct filename for processed training data based on parameters."""
     prefix = "train_cond" if cond else "train_data"
-    return f"{prefix}_{quantizer_type}_{transform_type}_{bits}bit.pt"
+    suffix = f"_{tag}" if (tag and str(tag).strip()) else ""
+    return f"{prefix}_{quantizer_type}_{transform_type}_{bits}bit{suffix}.pt"
+
+
+def _lowpass_fft_batch(x: torch.Tensor, *, cutoff_hz: float, sample_rate_hz: float) -> torch.Tensor:
+    """Ideal low-pass via rFFT masking over the last dimension.
+
+    Matches the approach used in diffusion/analysis/analysis.py (but batched).
+    Expects x shaped [N, T] (or any shape where last dim is time).
+    """
+    if not torch.is_tensor(x):
+        return x
+
+    sr = float(sample_rate_hz)
+    cutoff = float(cutoff_hz)
+    if (not math.isfinite(sr)) or sr <= 0 or (not math.isfinite(cutoff)) or cutoff <= 0:
+        return x
+    cutoff = min(cutoff, 0.5 * sr)
+
+    x_in = x.detach().to(torch.float32)
+    n = int(x_in.shape[-1])
+    if n <= 0:
+        return x_in
+
+    X = torch.fft.rfft(x_in, dim=-1)
+    freqs = torch.fft.rfftfreq(n, d=1.0 / sr).to(X.device)
+    mask = (freqs <= cutoff).to(X.dtype)
+    y = torch.fft.irfft(X * mask, n=n, dim=-1)
+    return y.to(torch.float32)
 
 
 
@@ -130,13 +170,19 @@ def create_transform(transform_config: dict, device: str):
     extra_kwargs = {k: v for k, v in pipeline_config.items() if k != 'transform'}
 
     if transform_name == 'stft':
+        # Pass through optional extras (e.g. out_shape) while keeping explicit defaults.
+        stft_kwargs = {
+            'n_fft': pipeline_config.get('n_fft', 30),
+            'hop_length': pipeline_config.get('hop_length', 64),
+            'win_length': pipeline_config.get('win_length', None),
+            'onesided': pipeline_config.get('onesided', True),
+            'center': pipeline_config.get('center', False),
+        }
+        if 'out_shape' in extra_kwargs:
+            stft_kwargs['out_shape'] = extra_kwargs.get('out_shape')
         return get_transform(
             'stft',
-            n_fft=pipeline_config.get('n_fft', 30),
-            hop_length=pipeline_config.get('hop_length', 64),
-            win_length=pipeline_config.get('win_length', None),
-            onesided=pipeline_config.get('onesided', True),
-            center=pipeline_config.get('center', False),
+            **stft_kwargs,
             device=device_obj,
         )
     else:
@@ -313,6 +359,13 @@ def process_data_before_training(config:dict):
     transform_type = config.get('transform_type', 'stft')
     cond_bits = config.get('bit_size', 4)  # Condition dataset bit depth
     real_bits = config.get('real_bit_size', 16)  # Real data bit depth
+
+    # Optional: apply a time-domain low-pass before quantization/transform.
+    lp_cfg = config.get('pre_lowpass') if isinstance(config.get('pre_lowpass'), dict) else {}
+    lp_cutoff_hz = float(lp_cfg.get('cutoff_hz', 0.0) or 0.0)
+    lp_sample_rate_hz = float(lp_cfg.get('sample_rate_hz', 0.0) or 0.0)
+    lp_enabled = bool(lp_cfg.get('enabled', False)) and lp_cutoff_hz > 0 and lp_sample_rate_hz > 0
+    lp_tag = _format_lowpass_tag(lp_cutoff_hz, lp_sample_rate_hz) if lp_enabled else None
     
     # Get directories from config
     checkpoint_dir = Path(config.get('checkpoint_dir'))
@@ -340,8 +393,8 @@ def process_data_before_training(config:dict):
     print(f"[train_diffuser] Config saved to: {config_path}")
     
     # Real data versus conditonal (hgih vs low bit depth)
-    cond_filename = construct_train_filename(quantizer_type, transform_type, cond_bits, cond=True)
-    real_filename = construct_train_filename(quantizer_type, transform_type, real_bits, cond=False)
+    cond_filename = construct_train_filename(quantizer_type, transform_type, cond_bits, cond=True, tag=lp_tag)
+    real_filename = construct_train_filename(quantizer_type, transform_type, real_bits, cond=False, tag=lp_tag)
     
     if s3_data_uri is not None:
         from diffusion.aws.s3_io import normalize_s3_uri, join_s3_uri
@@ -432,6 +485,14 @@ def process_data_before_training(config:dict):
             print(f"[train_diffuser] Condition shape: {cond_data.shape} (samples: {cond_data.shape[0]})")
             print(f"[train_diffuser] Real data shape: {real_data.shape} (samples: {real_data.shape[0]})")
             print(f"[train_diffuser] Expected batches with batch_size=16: {cond_data.shape[0] // 16}")
+
+            expected_c = 2 if bool(config.get('use_phase_channel', False)) else 1
+            if int(cond_data.shape[1]) != expected_c or int(real_data.shape[1]) != expected_c:
+                raise ValueError(
+                    f"Loaded preprocessed tensors with channels cond={int(cond_data.shape[1])} real={int(real_data.shape[1])}, "
+                    f"but expected {expected_c} for use_phase_channel={bool(config.get('use_phase_channel', False))}. "
+                    "Re-run preprocessing with force_preprocess=True (or regenerate S3 tensors) for this setting."
+                )
         except FileNotFoundError:
             raise ValueError(
                 "Preprocessed data not found in S3. This run is configured for S3-only data loading. "
@@ -458,6 +519,14 @@ def process_data_before_training(config:dict):
         
         print(f"[train_diffuser] Condition shape: {cond_data.shape}")
         print(f"[train_diffuser] Real data shape: {real_data.shape}")
+
+        expected_c = 2 if bool(config.get('use_phase_channel', False)) else 1
+        if int(cond_data.shape[1]) != expected_c or int(real_data.shape[1]) != expected_c:
+            raise ValueError(
+                f"Loaded preprocessed tensors with channels cond={int(cond_data.shape[1])} real={int(real_data.shape[1])}, "
+                f"but expected {expected_c} for use_phase_channel={bool(config.get('use_phase_channel', False))}. "
+                "Re-run preprocessing with force_preprocess=True for this setting."
+            )
         
     elif raw_data_path.exists():
         # Load raw data and process to both bit depths
@@ -491,6 +560,13 @@ def process_data_before_training(config:dict):
             )
             # Replace signals used for preprocessing/training.
             signals = train_signals
+
+        if lp_enabled:
+            print(
+                f"[train_diffuser] Applying time-domain low-pass before training "
+                f"(cutoff_hz={lp_cutoff_hz:g}, sample_rate_hz={lp_sample_rate_hz:g})"
+            )
+            signals = _lowpass_fft_batch(signals, cutoff_hz=lp_cutoff_hz, sample_rate_hz=lp_sample_rate_hz)
 
         # Quantize in TIME DOMAIN first to create degraded (4-bit) and target waveforms.
         # If raw is already at `real_bits`, we skip quantizing the target waveform.
@@ -567,8 +643,26 @@ def process_data_before_training(config:dict):
         real_mag = transform_real.apply(real_time)
         print(f"[train_diffuser] After transform shapes: cond {cond_mag.shape}, real {real_mag.shape}")
 
-        cond_data = cond_mag
-        real_data = real_mag
+        use_phase_channel = bool(config.get('use_phase_channel', False))
+        if use_phase_channel:
+            cond_phase = getattr(transform_cond, 'phase', None)
+            real_phase = getattr(transform_real, 'phase', None)
+            if cond_phase is None or real_phase is None:
+                raise ValueError(
+                    "use_phase_channel=True requires transforms to expose `phase`. "
+                    "(STFT/DFT do; Haar does not.)"
+                )
+
+            # Normalize phase angle to [-1, 1] by dividing by pi.
+            cond_phase_ch = torch.clamp(cond_phase.to(torch.float32) / math.pi, -1.0, 1.0)
+            real_phase_ch = torch.clamp(real_phase.to(torch.float32) / math.pi, -1.0, 1.0)
+
+            # Stack into channels: [N, 2, H, W]
+            cond_data = torch.stack([cond_mag.to(torch.float32), cond_phase_ch], dim=1)
+            real_data = torch.stack([real_mag.to(torch.float32), real_phase_ch], dim=1)
+        else:
+            cond_data = cond_mag
+            real_data = real_mag
         
     
         if cond_data.ndim == 3:
@@ -610,11 +704,14 @@ def process_data_before_training(config:dict):
             )
         raise ValueError(f"Raw data not found at {raw_data_path}")
     
+    use_phase_channel = bool(config.get('use_phase_channel', False))
     print(f"[train_diffuser] Computing magnitude ranges (full dataset)")
-    cond_mag_min = float(cond_data.min().item())
-    cond_mag_max = float(cond_data.max().item())
-    real_mag_min = float(real_data.min().item())
-    real_mag_max = float(real_data.max().item())
+    cond_mag_view = (cond_data[:, :1] if (use_phase_channel and cond_data.ndim == 4 and cond_data.shape[1] >= 1) else cond_data)
+    real_mag_view = (real_data[:, :1] if (use_phase_channel and real_data.ndim == 4 and real_data.shape[1] >= 1) else real_data)
+    cond_mag_min = float(cond_mag_view.min().item())
+    cond_mag_max = float(cond_mag_view.max().item())
+    real_mag_min = float(real_mag_view.min().item())
+    real_mag_max = float(real_mag_view.max().item())
 
     # Limit dataset size for faster local testing (training subset only)
     max_samples = config.get('max_samples')
@@ -639,25 +736,87 @@ def process_data_before_training(config:dict):
     # For each sample i, compute cond_min[i], cond_max[i] over (H,W), then:
     #   cond_norm = (cond - cond_min) / (cond_max-cond_min) -> [-1, 1]
     #   real_norm = (real - cond_min) / (cond_max-cond_min) -> may exceed [-1, 1]
-    print(f"[train_diffuser] Normalizing spectrogram magnitudes using per-sample condition min/max")
+    mag_norm_mode = str(config.get('mag_norm_mode', 'minmax') or 'minmax').strip().lower()
+    mag_norm_eps = float(config.get('mag_norm_epsilon', 1e-8) or 1e-8)
+    if mag_norm_eps <= 0 or (not math.isfinite(mag_norm_eps)):
+        mag_norm_eps = 1e-8
+
+    if mag_norm_mode in {'absmax', 'peak', 'max'}:
+        mag_norm_mode = 'absmax'
+        print(f"[train_diffuser] Normalizing spectrogram magnitudes using per-sample condition absmax (peak)")
+    elif mag_norm_mode in {'zscore', 'z_score', 'standardize'}:
+        mag_norm_mode = 'zscore'
+        print(f"[train_diffuser] Normalizing spectrogram magnitudes using per-sample z-score (mean/std, clamp_sigma={config.get('mag_norm_clamp_sigma', 3.0)})")
+    elif mag_norm_mode in {'none', 'off', 'identity'}:
+        mag_norm_mode = 'none'
+        print(f"[train_diffuser] Spectrogram magnitude normalization DISABLED (raw values passed to model)")
+    else:
+        mag_norm_mode = 'minmax'
+        print(f"[train_diffuser] Normalizing spectrogram magnitudes using per-sample condition min/max")
 
     cond_data = cond_data.to(torch.float32)
     real_data = real_data.to(torch.float32)
 
-    # Per-sample condition ranges: shape [N, 1, 1, 1]
-    cond_min = cond_data.amin(dim=(2, 3), keepdim=True)
-    cond_max = cond_data.amax(dim=(2, 3), keepdim=True)
-    denom = cond_max - cond_min
-    denom = torch.where(denom.abs() < 1e-8, torch.ones_like(denom), denom)
+    if use_phase_channel:
+        # Only normalize magnitude channel; keep phase channel as angle/pi in [-1,1].
+        if cond_data.shape[1] < 2 or real_data.shape[1] < 2:
+            raise ValueError(f"use_phase_channel=True expects 2 channels, got cond={tuple(cond_data.shape)} real={tuple(real_data.shape)}")
+        cond_mag_ch = cond_data[:, :1]
+        cond_phase_ch = torch.clamp(cond_data[:, 1:2], -1.0, 1.0)
+        real_mag_ch = real_data[:, :1]
+        real_phase_ch = torch.clamp(real_data[:, 1:2], -1.0, 1.0)
+        cond_data = cond_mag_ch
+        real_data = real_mag_ch
 
-    cond_data = (cond_data - cond_min) / denom
-    cond_data = cond_data * 2.0 - 1.0
-    real_data = (real_data - cond_min) / denom
-    real_data = real_data * 2.0 - 1.0
-    
-    # Clip to [-1, 1] to prevent numerical instability
-    cond_data = torch.clamp(cond_data, -1.0, 1.0)
-    real_data = torch.clamp(real_data, -1.0, 1.0)
+    # Per-sample condition-derived scaling stats: shape [N, 1, 1, 1]
+    if mag_norm_mode == 'none':
+        # Identity: no transform, denom=1 and min=0 so denorm = x * 1 + 0 = x
+        cond_min = torch.zeros(cond_data.shape[0], 1, 1, 1, dtype=cond_data.dtype, device=cond_data.device)
+        denom = torch.ones_like(cond_min)
+        # No clamp — data is passed raw
+    elif mag_norm_mode == 'zscore':
+        clamp_sigma = float(config.get('mag_norm_clamp_sigma', 3.0) or 3.0)
+        if clamp_sigma <= 0 or not math.isfinite(clamp_sigma):
+            clamp_sigma = 3.0
+        cond_mean = cond_data.mean(dim=(2, 3), keepdim=True)
+        cond_std = cond_data.std(dim=(2, 3), keepdim=True, unbiased=False)
+        # denom = std * clamp_sigma  so that ±clamp_sigma std devs map to ±1
+        denom = cond_std * clamp_sigma
+        denom = torch.where(denom.abs() < mag_norm_eps, torch.ones_like(denom), denom)
+        cond_min = cond_mean  # repurposed: stores mean for denorm = x * denom + mean
+
+        cond_data = (cond_data - cond_mean) / denom
+        real_data = (real_data - cond_mean) / denom
+    elif mag_norm_mode == 'minmax':
+        cond_min = cond_data.amin(dim=(2, 3), keepdim=True)
+        cond_max = cond_data.amax(dim=(2, 3), keepdim=True)
+        denom = cond_max - cond_min
+        denom = torch.where(denom.abs() < mag_norm_eps, torch.ones_like(denom), denom)
+
+        cond_data = (cond_data - cond_min) / denom
+        cond_data = cond_data * 2.0 - 1.0
+        real_data = (real_data - cond_min) / denom
+        real_data = real_data * 2.0 - 1.0
+    else:
+        # absmax: magnitudes are non-negative, use condition peak as the only scale.
+        cond_peak = cond_data.amax(dim=(2, 3), keepdim=True)
+        denom = torch.where(cond_peak.abs() < mag_norm_eps, torch.ones_like(cond_peak), cond_peak)
+        cond_min = torch.zeros_like(denom)
+
+        cond_data = cond_data / denom
+        cond_data = cond_data * 2.0 - 1.0
+        real_data = real_data / denom
+        real_data = real_data * 2.0 - 1.0
+
+    # Clip to [-1, 1] to prevent numerical instability from real-data outliers.
+    # Skip clamp for 'none' mode since data is intentionally unnormalized.
+    if mag_norm_mode != 'none':
+        cond_data = torch.clamp(cond_data, -1.0, 1.0)
+        real_data = torch.clamp(real_data, -1.0, 1.0)
+
+    if use_phase_channel:
+        cond_data = torch.cat([cond_data, cond_phase_ch], dim=1)
+        real_data = torch.cat([real_data, real_phase_ch], dim=1)
 
     # Cast tensors to specified dtype 
     train_dtype = _resolve_torch_dtype(config, device)
@@ -681,13 +840,23 @@ def process_data_before_training(config:dict):
         'cond_mag_max': cond_mag_max,
         'real_mag_min': real_mag_min,
         'real_mag_max': real_mag_max,
-        'mag_normalization': 'condition_per_sample',
+        'mag_normalization': f'condition_per_sample_{mag_norm_mode}',
+        'mag_norm_mode': str(mag_norm_mode),
+        'mag_norm_epsilon': float(mag_norm_eps),
+        'use_phase_channel': bool(use_phase_channel),
+        'phase_normalization': ('angle_over_pi' if use_phase_channel else None),
         'test_holdout_count': int(test_holdout_count),
         'test_holdout_from_end': bool(test_holdout_from_end),
         'cond_bits': int(cond_bits),
         'real_bits': int(real_bits),
         'transform_type': transform_type,
         'pipeline_config': config.get('pipeline_config'),
+        'pre_lowpass': {
+            'enabled': bool(lp_enabled),
+            'cutoff_hz': float(lp_cutoff_hz),
+            'sample_rate_hz': float(lp_sample_rate_hz),
+            'tag': lp_tag,
+        },
     }
 
     # Always save a per-run copy of normalizer_params locally (inside results/data)
@@ -770,6 +939,10 @@ def train_diffuser(real_data,cond_data, checkpoint_dir, samples_dir, logs_dir, e
         log_advanced_metrics=config.get('log_advanced_metrics', True),
         advanced_metrics_every_n_steps=config.get('advanced_metrics_every_n_steps', 50),
         energy_curve_every_n_steps=config.get('energy_curve_every_n_steps', 200),
+        ema_config=config.get('ema_config'),
+        total_training_steps=int(total_steps),
+        loss_components_every_n_steps=int(config.get('loss_components_every_n_steps', 50)),
+        early_stop_config=config.get('early_stop_config'),
     )
     
     trainer.fit(

@@ -52,7 +52,7 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
     p.add_argument("--region", default="us-east-1", help="AWS region (default: us-east-1)")
-    p.add_argument("--version", default="V1", help="Dataset/results version (default: V1)")
+    p.add_argument("--version", default="V7", help="Dataset/results version (default: V1)")
     p.add_argument(
         "--what",
         choices=["data", "results", "all"],

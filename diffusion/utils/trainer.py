@@ -44,6 +44,10 @@ class DiffusionTrainer:
         log_advanced_metrics: bool = True,
         advanced_metrics_every_n_steps: int = 50,
         energy_curve_every_n_steps: int = 200,
+        ema_config: Optional[Dict[str, Any]] = None,
+        total_training_steps: Optional[int] = None,
+        loss_components_every_n_steps: int = 50,
+        early_stop_config: Optional[Dict[str, Any]] = None,
     ):
         """Initialize trainer.
         
@@ -88,6 +92,16 @@ class DiffusionTrainer:
         self.log_advanced_metrics = bool(log_advanced_metrics)
         self.advanced_metrics_every_n_steps = int(advanced_metrics_every_n_steps)
         self.energy_curve_every_n_steps = int(energy_curve_every_n_steps)
+
+        self.loss_components_every_n_steps = int(loss_components_every_n_steps)
+        self.total_training_steps = int(total_training_steps) if total_training_steps is not None else None
+
+        self.ema_config = ema_config if isinstance(ema_config, dict) else {}
+        self._ema = None
+
+        # Optional early stopping on moving-average validation loss.
+        # Controlled via early_stop_config={enabled, window_epochs/window, patience, min_delta}.
+        self.early_stop_config = early_stop_config if isinstance(early_stop_config, dict) else {}
         
         print(f"[Trainer] Initialized on device: {self.accelerator.device}")
         print(f"  - Checkpoints: {self.checkpoints_dir}")
@@ -95,6 +109,7 @@ class DiffusionTrainer:
         print(f"  - Logs: {self.logs_dir}")
         print(f"  - Gradient accumulation steps: {gradient_accumulation_steps}")
         print(f"  - Validation split: {validation_split:.1%}")
+
 
     @staticmethod
     def _batch_stats(x: torch.Tensor, prefix: str) -> Dict[str, float]:
@@ -225,6 +240,19 @@ class DiffusionTrainer:
         self.model, self.optimizer, train_loader = self.accelerator.prepare(
             self.model, self.optimizer, train_loader
         )
+
+        # Initialize EMA on the prepared (wrapped) model.
+        if self.ema_config.get('enabled'):
+            try:
+                unwrapped = self.accelerator.unwrap_model(self.model)
+                decay = float(self.ema_config.get('decay', 0.999))
+                self._ema = _ModelEMA(unwrapped, decay=decay)
+                if self.accelerator.is_main_process:
+                    print(f"[Trainer] EMA enabled (decay={decay})")
+            except Exception as e:
+                if self.accelerator.is_main_process:
+                    print(f"[Trainer] EMA init failed; continuing without EMA: {e}")
+                self._ema = None
         
         if val_loader:
             val_loader = self.accelerator.prepare(val_loader)
@@ -238,6 +266,17 @@ class DiffusionTrainer:
         if self.accelerator.is_main_process:
             self.accelerator.init_trackers("diffusion_training")
             print(f"[Trainer] Tensorboard logs: {self.logs_dir / 'diffusion_training'}")
+
+        # Moving-average early stop state.
+        val_ma_history: list[float] = []
+        best_val_ma: float | None = None
+        bad_windows: int = 0
+        es_enabled = bool(self.early_stop_config.get('enabled', False))
+        es_window = int(self.early_stop_config.get('window_epochs', self.early_stop_config.get('window', 5)) or 5)
+        es_window = max(1, es_window)
+        es_patience = int(self.early_stop_config.get('patience', 1) or 1)
+        es_patience = max(1, es_patience)
+        es_min_delta = float(self.early_stop_config.get('min_delta', 0.0) or 0.0)
         
         for epoch in range(self.current_epoch, epochs):
             self.current_epoch = epoch
@@ -255,6 +294,35 @@ class DiffusionTrainer:
                             self.checkpoints_dir / "best_model.pt",
                             is_best=True
                         )
+
+                # Early stopping (moving-average validation loss)
+                if es_enabled and (val_loss is not None):
+                    try:
+                        val_ma_history.append(float(val_loss))
+                        if len(val_ma_history) >= es_window:
+                            ma = sum(val_ma_history[-es_window:]) / float(es_window)
+                            if best_val_ma is None or (ma <= (best_val_ma - es_min_delta)):
+                                best_val_ma = float(ma)
+                                bad_windows = 0
+                            else:
+                                bad_windows += 1
+
+                            if self.accelerator.is_main_process:
+                                print(
+                                    f"[early_stop] epoch={epoch+1} val_ma({es_window})={ma:.6f} "
+                                    f"best_ma={best_val_ma:.6f} bad_windows={bad_windows}/{es_patience}"
+                                )
+
+                            if bad_windows >= es_patience:
+                                if self.accelerator.is_main_process:
+                                    print(
+                                        f"[early_stop] Stopping early: val_ma({es_window}) did not improve "
+                                        f"by >= {es_min_delta:g} for {bad_windows} window(s)."
+                                    )
+                                break
+                    except Exception as e:
+                        if self.accelerator.is_main_process:
+                            print(f"[early_stop] Warning: failed to compute early stop criterion: {e}")
             
             if self.accelerator.is_main_process and (epoch + 1) % self.save_every_n_epochs == 0:
                 self._save_checkpoint(
@@ -303,6 +371,14 @@ class DiffusionTrainer:
         
         for batch_idx, (cond_batch, real_batch) in enumerate(progress_bar):
             with self.accelerator.accumulate(self.model):
+                # Provide model the current training progress for dynamic loss schedules.
+                try:
+                    unwrapped = self.accelerator.unwrap_model(self.model)
+                    if hasattr(unwrapped, 'set_training_progress'):
+                        unwrapped.set_training_progress(step=int(self.global_step), total_steps=self.total_training_steps)
+                except Exception:
+                    pass
+
                 loss = self.model(real_batch, cond_batch)
                 self.accelerator.backward(loss)
                 
@@ -313,6 +389,34 @@ class DiffusionTrainer:
                 if self.lr_scheduler:
                     self.lr_scheduler.step()
                 self.optimizer.zero_grad()
+
+                # EMA update on optimizer step.
+                if self._ema is not None and self.accelerator.sync_gradients:
+                    try:
+                        unwrapped = self.accelerator.unwrap_model(self.model)
+                        # Optional linear schedule for EMA decay.
+                        ema_decay = float(self.ema_config.get('decay', 0.999))
+                        sched = self.ema_config.get('schedule') if isinstance(self.ema_config.get('schedule'), dict) else None
+                        if sched and isinstance(self.global_step, int):
+                            if str(sched.get('type', 'linear')).lower() == 'linear':
+                                start = float(sched.get('decay_start', ema_decay))
+                                end = float(sched.get('decay_end', ema_decay))
+                                start_step = int(sched.get('start_step', 0))
+                                end_step = sched.get('end_step', None)
+                                if end_step is None:
+                                    end_step = int(self.total_training_steps) if self.total_training_steps is not None else start_step
+                                end_step = int(end_step)
+                                if end_step > start_step:
+                                    if self.global_step <= start_step:
+                                        ema_decay = start
+                                    elif self.global_step >= end_step:
+                                        ema_decay = end
+                                    else:
+                                        t = (float(self.global_step) - float(start_step)) / (float(end_step) - float(start_step))
+                                        ema_decay = float(start + t * (end - start))
+                        self._ema.update(unwrapped, decay=float(ema_decay))
+                    except Exception:
+                        pass
             
             total_loss += loss.detach().item()
             num_batches += 1
@@ -324,6 +428,37 @@ class DiffusionTrainer:
                 'lr': f'{current_lr:.2e}',
                 'step': self.global_step
             })
+
+            # Print/log low/high bucket loss components if the model provides them.
+            try:
+                unwrapped = self.accelerator.unwrap_model(self.model)
+                comps = getattr(unwrapped, 'last_loss_components', None)
+                if isinstance(comps, dict) and self.accelerator.is_local_main_process:
+                    low = comps.get('loss_low_bucket')
+                    high = comps.get('loss_high_bucket')
+                    if isinstance(low, (int, float)) and isinstance(high, (int, float)):
+                        progress_bar.set_postfix({
+                            'loss': f'{loss.item():.4f}',
+                            'low': f'{float(low):.4f}',
+                            'high': f'{float(high):.4f}',
+                            'lr': f'{current_lr:.2e}',
+                            'step': self.global_step,
+                        })
+
+                if isinstance(comps, dict) and self.accelerator.is_main_process:
+                    every = max(1, int(self.loss_components_every_n_steps))
+                    if self.accelerator.sync_gradients and (int(self.global_step) % every == 0):
+                        low = comps.get('loss_low_bucket')
+                        high = comps.get('loss_high_bucket')
+                        cutoff = comps.get('bucket_cutoff_bins')
+                        wlow = comps.get('mean_weight_low_bucket')
+                        whigh = comps.get('mean_weight_high_bucket')
+                        msg = f"[loss buckets] step={self.global_step} cutoff_bins={cutoff} low={low:.6f} high={high:.6f}"
+                        if isinstance(wlow, (int, float)) and isinstance(whigh, (int, float)):
+                            msg += f" w_low~{float(wlow):.3f} w_high~{float(whigh):.3f}"
+                        print(msg)
+            except Exception:
+                pass
 
             if self.log_advanced_metrics:
                 # Aggregate cheap scalar stats once per batch; logged at end of epoch.
@@ -416,6 +551,12 @@ class DiffusionTrainer:
             'global_step': self.global_step,
             'best_val_loss': self.best_val_loss,
         }
+
+        if self._ema is not None:
+            try:
+                checkpoint['ema_state_dict'] = self._ema.state_dict()
+            except Exception:
+                pass
         
         if self.lr_scheduler:
             checkpoint['lr_scheduler_state_dict'] = self.lr_scheduler.state_dict()
@@ -437,5 +578,47 @@ class DiffusionTrainer:
         self.current_epoch = checkpoint['epoch'] + 1
         self.global_step = checkpoint['global_step']
         self.best_val_loss = checkpoint.get('best_val_loss', float('inf'))
+
+        if self._ema is not None and isinstance(checkpoint.get('ema_state_dict'), dict):
+            try:
+                self._ema.load_state_dict(checkpoint['ema_state_dict'])
+                if self.accelerator.is_main_process:
+                    print("[Trainer] Restored EMA state")
+            except Exception:
+                pass
         
         print(f"[Trainer] Resumed from epoch {self.current_epoch}, step {self.global_step}")
+
+
+class _ModelEMA:
+    """Lightweight EMA for model parameters (CPU/GPU agnostic)."""
+
+    def __init__(self, model: nn.Module, decay: float = 0.999):
+        self.decay = float(decay)
+        self.shadow: Dict[str, torch.Tensor] = {}
+        for name, p in model.named_parameters():
+            if not p.requires_grad:
+                continue
+            self.shadow[name] = p.detach().clone()
+
+    def update(self, model: nn.Module, decay: float | None = None) -> None:
+        d = float(self.decay if decay is None else decay)
+        with torch.no_grad():
+            for name, p in model.named_parameters():
+                if name not in self.shadow:
+                    continue
+                if not p.requires_grad:
+                    continue
+                self.shadow[name].mul_(d).add_(p.detach(), alpha=(1.0 - d))
+
+    def state_dict(self) -> Dict[str, Any]:
+        return {
+            'decay': float(self.decay),
+            'shadow': {k: v.detach().cpu() for k, v in self.shadow.items()},
+        }
+
+    def load_state_dict(self, state: Dict[str, Any]) -> None:
+        self.decay = float(state.get('decay', self.decay))
+        shadow = state.get('shadow', {})
+        if isinstance(shadow, dict):
+            self.shadow = {k: v.detach().clone() for k, v in shadow.items() if torch.is_tensor(v)}

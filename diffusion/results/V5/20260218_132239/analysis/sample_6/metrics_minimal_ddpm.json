@@ -1,0 +1,11 @@
+{
+  "sample_idx": 6,
+  "sampler_type": "ddpm",
+  "gen_time_key": "time_domain",
+  "mse_cond4_vs_target": 0.004394840449094772,
+  "mse_gen0_vs_target": 0.34498417377471924,
+  "mse_gen0_maglp_vs_target": 0.03398263826966286,
+  "mag_lowpass_hz": 40.0,
+  "mag_lowpass_kind": "taper",
+  "mag_lowpass_transition_bins": 8
+}

@@ -591,12 +591,12 @@ uv run python -m diffusion.aws.anyscale_sample \
 # Download artifacts from S3 (uses default bucket, optionally delete)
 uv run python -m diffusion.aws.download_s3_artifacts \
   --region us-east-1 \
-  --run-id 20260204_215551 \
+  --run-id 20260217_234950_v2_lowfreqloss \
   --delete-after
 
 # View tensorboard
-uv run tensorboard --logdir diffusion/results/V1/20260204_215551/logs
-
+uv run tensorboard --logdir diffusion/results/V1/20260217_234950/logs
+/Users/ryanpadnis/EE269Project/diffusion/results/V2/20260217_234950
 # Stop workspace (to save costs)
 uv run anyscale workspace_v2 terminate --name EE269-spot2 --yes
 

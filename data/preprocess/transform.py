@@ -36,6 +36,7 @@ class STFTTransform(SignalTransform):
         onesided=True,
         win_length=None,
         center=False,
+        out_shape: tuple[int, int] | None = None,
         torch_dtype=torch.float32,
         device=torch.device('cpu'),
     ):
@@ -45,6 +46,7 @@ class STFTTransform(SignalTransform):
         self.hop_length = hop_length
         self.onesided = onesided
         self.center = center
+        self.out_shape = tuple(out_shape) if out_shape is not None else None
 
         self.win_length = win_length if win_length is not None else n_fft
         if self.win_length > self.n_fft:
@@ -57,7 +59,44 @@ class STFTTransform(SignalTransform):
             'win_length': self.win_length,
             'onesided': onesided,
             'center': center,
+            'out_shape': self.out_shape,
         }
+
+    def _apply_out_shape(self, mag: torch.Tensor, phase: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Pad/crop STFT outputs to out_shape=(H,W) if set.
+
+        - H must match the number of STFT frequency bins (no implicit resampling).
+          If you want H bins, choose n_fft such that H = n_fft//2 + 1 (onesided=True).
+        - W is padded with zeros (or cropped) along time frames.
+        """
+        if self.out_shape is None:
+            return mag, phase
+
+        H, W = int(self.out_shape[0]), int(self.out_shape[1])
+        if H <= 0 or W <= 0:
+            raise ValueError(f"out_shape must be positive, got {self.out_shape}")
+
+        cur_H = int(mag.shape[-2])
+        cur_W = int(mag.shape[-1])
+
+        if cur_H != H:
+            raise ValueError(
+                f"STFT produced {cur_H} freq bins but out_shape requests {H}. "
+                f"Set n_fft so that (n_fft//2 + 1) == {H} (with onesided=True)."
+            )
+
+        if cur_W == W:
+            return mag, phase
+
+        if cur_W > W:
+            mag = mag[..., :W]
+            phase = phase[..., :W]
+            return mag, phase
+
+        pad = W - cur_W
+        mag = torch.nn.functional.pad(mag, (0, pad), mode='constant', value=0.0)
+        phase = torch.nn.functional.pad(phase, (0, pad), mode='constant', value=0.0)
+        return mag, phase
 
     def apply(self, signal: torch.Tensor) -> torch.Tensor:
         """
@@ -90,6 +129,8 @@ class STFTTransform(SignalTransform):
     
         self.magnitude = torch.abs(stft_complex)
         self.phase = torch.angle(stft_complex)
+
+        self.magnitude, self.phase = self._apply_out_shape(self.magnitude, self.phase)
         
         return self.magnitude
     

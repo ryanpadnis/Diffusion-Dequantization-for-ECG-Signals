@@ -641,9 +641,31 @@ def _prepare_s3(
 	return s3_runs_parent, s3_run_prefix, stop_event, sync_thread
 
 
-def _construct_train_filename(*, quantizer_type: str, transform_type: str, bits: int, cond: bool) -> str:
+
+def _format_lowpass_tag(cutoff_hz: float, sample_rate_hz: float) -> str:
+	def _fmt(x: float) -> str:
+		if abs(x - round(x)) < 1e-9:
+			return str(int(round(x)))
+		s = f"{x:.6g}"
+		return s.replace('.', 'p')
+
+	return f"lp{_fmt(float(cutoff_hz))}hz_sr{_fmt(float(sample_rate_hz))}"
+
+
+def _lowpass_tag_from_config(config: dict) -> str | None:
+	lp_cfg = config.get('pre_lowpass') if isinstance(config.get('pre_lowpass'), dict) else {}
+	cutoff = float(lp_cfg.get('cutoff_hz', 0.0) or 0.0)
+	sr = float(lp_cfg.get('sample_rate_hz', 0.0) or 0.0)
+	enabled = bool(lp_cfg.get('enabled', False)) and cutoff > 0 and sr > 0
+	if not enabled:
+		return None
+	return _format_lowpass_tag(cutoff, sr)
+
+
+def _construct_train_filename(*, quantizer_type: str, transform_type: str, bits: int, cond: bool, tag: str | None = None) -> str:
 	prefix = "train_cond" if cond else "train_data"
-	return f"{prefix}_{quantizer_type}_{transform_type}_{bits}bit.pt"
+	suffix = f"_{tag}" if (tag and str(tag).strip()) else ""
+	return f"{prefix}_{quantizer_type}_{transform_type}_{bits}bit{suffix}.pt"
 
 
 def _s3_preprocessed_objects_exist(*, s3_data_uri: str, config: dict) -> bool:
@@ -653,18 +675,21 @@ def _s3_preprocessed_objects_exist(*, s3_data_uri: str, config: dict) -> bool:
 	transform_type = str(config.get("transform_type", "stft"))
 	cond_bits = int(config.get("bit_size", 4) or 4)
 	real_bits = int(config.get("real_bit_size", 16) or 16)
+	tag = _lowpass_tag_from_config(config)
 
 	cond_name = _construct_train_filename(
 		quantizer_type=quantizer_type,
 		transform_type=transform_type,
 		bits=cond_bits,
 		cond=True,
+		tag=tag,
 	)
 	real_name = _construct_train_filename(
 		quantizer_type=quantizer_type,
 		transform_type=transform_type,
 		bits=real_bits,
 		cond=False,
+		tag=tag,
 	)
 
 	cond_s3 = join_s3_uri(s3_data_uri, cond_name)

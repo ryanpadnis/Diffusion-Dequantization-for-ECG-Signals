@@ -1,0 +1,91 @@
+{
+  "sample_dir": "diffusion/results/V6/20260218_144236/samples/ddpm/sample_0",
+  "pipeline_transform": "stft",
+  "sampler_type": "ddpm",
+  "time_rescale_peak_factor": 3.0453431899363257,
+  "mse_time(generated_scaled_vs_target)": 0.1916518360376358,
+  "mag_match_config": {
+    "enabled": true,
+    "methods": [
+      "l2",
+      "p95"
+    ],
+    "band_hz": null,
+    "clamp_min": 0.25,
+    "clamp_max": 4.0
+  },
+  "variants": {
+    "baseline": {
+      "method": null,
+      "factor": null,
+      "metrics": {
+        "mse_spec_mag(cond4_vs_target)": 0.20378558337688446,
+        "mse_spec_mag(generated_vs_target)": 7.891898155212402,
+        "mse_spec_log1p(cond4_vs_target)": 0.04946718364953995,
+        "mse_spec_log1p(generated_vs_target)": 0.28659534454345703,
+        "mse_time(cond4_vs_target)": 0.0035552692133933306,
+        "mse_time(generated_vs_target)": 0.06675847619771957,
+        "corr_time(cond4_vs_target)": 0.9813748002052307,
+        "corr_time(generated_vs_target)": 0.6003350615501404,
+        "peak_ratio_time(cond4_vs_target)": 0.9375000071300776,
+        "peak_ratio_time(generated_vs_target)": 0.3078470740163197,
+        "rms_ratio_time(cond4_vs_target)": 1.027493242536233,
+        "rms_ratio_time(generated_vs_target)": 0.5558406158352073,
+        "mean_ratio_spec_mag(cond4_vs_target)": 1.1955102682113647,
+        "mean_ratio_spec_mag(generated_vs_target)": 0.4686118960380554,
+        "p95_ratio_spec_mag(cond4_vs_target)": 1.0055341720581055,
+        "p95_ratio_spec_mag(generated_vs_target)": 0.16569271683692932,
+        "improvement_pct_spec_mag": -3772.6479196602413,
+        "improvement_pct_time": -1777.7333639384758
+      }
+    },
+    "magmatch_l2": {
+      "method": "l2",
+      "factor": 1.3151543140411377,
+      "metrics": {
+        "mse_spec_mag(cond4_vs_target)": 0.20378558337688446,
+        "mse_spec_mag(generated_vs_target)": 9.769779205322266,
+        "mse_spec_log1p(cond4_vs_target)": 0.04946718364953995,
+        "mse_spec_log1p(generated_vs_target)": 0.2653675377368927,
+        "mse_time(cond4_vs_target)": 0.0035552692133933306,
+        "mse_time(generated_vs_target)": 0.06976919621229172,
+        "corr_time(cond4_vs_target)": 0.9813748002052307,
+        "corr_time(generated_vs_target)": 0.6003350019454956,
+        "peak_ratio_time(cond4_vs_target)": 0.9375000071300776,
+        "peak_ratio_time(generated_vs_target)": 0.4048664024829948,
+        "rms_ratio_time(cond4_vs_target)": 1.027493242536233,
+        "rms_ratio_time(generated_vs_target)": 0.7310161790554395,
+        "mean_ratio_spec_mag(cond4_vs_target)": 1.1955102682113647,
+        "mean_ratio_spec_mag(generated_vs_target)": 0.6162969470024109,
+        "p95_ratio_spec_mag(cond4_vs_target)": 1.0055341720581055,
+        "p95_ratio_spec_mag(generated_vs_target)": 0.2179114818572998,
+        "improvement_pct_spec_mag": -4694.14639810603,
+        "improvement_pct_time": -1862.4166842122324
+      }
+    },
+    "magmatch_p95": {
+      "method": "p95",
+      "factor": 4.0,
+      "metrics": {
+        "mse_spec_mag(cond4_vs_target)": 0.20378558337688446,
+        "mse_spec_mag(generated_vs_target)": 72.9775619506836,
+        "mse_spec_log1p(cond4_vs_target)": 0.04946718364953995,
+        "mse_spec_log1p(generated_vs_target)": 0.29999515414237976,
+        "mse_time(cond4_vs_target)": 0.0035552692133933306,
+        "mse_time(generated_vs_target)": 0.33520811796188354,
+        "corr_time(cond4_vs_target)": 0.9813748002052307,
+        "corr_time(generated_vs_target)": 0.6003350615501404,
+        "peak_ratio_time(cond4_vs_target)": 0.9375000071300776,
+        "peak_ratio_time(generated_vs_target)": 1.2313882960652789,
+        "rms_ratio_time(cond4_vs_target)": 1.027493242536233,
+        "rms_ratio_time(generated_vs_target)": 2.223362463340829,
+        "mean_ratio_spec_mag(cond4_vs_target)": 1.1955102682113647,
+        "mean_ratio_spec_mag(generated_vs_target)": 1.8744475841522217,
+        "p95_ratio_spec_mag(cond4_vs_target)": 1.0055341720581055,
+        "p95_ratio_spec_mag(generated_vs_target)": 0.6627708673477173,
+        "improvement_pct_spec_mag": -35710.95421049372,
+        "improvement_pct_time": -9328.487628984467
+      }
+    }
+  }
+}
