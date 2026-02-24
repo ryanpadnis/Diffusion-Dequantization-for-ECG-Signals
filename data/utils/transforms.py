@@ -31,7 +31,7 @@ class STFTTransform(SignalTransform):
 
     def __init__(
         self,
-        n_fft=30,
+        n_fft=256,
         hop_length=64,
         onesided=True,
         win_length=None,
