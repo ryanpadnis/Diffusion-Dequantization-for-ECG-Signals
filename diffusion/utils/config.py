@@ -14,7 +14,7 @@ class DiffusionConfig:
 
     # Run metadata
     # Mirroring V2/20260213_151839 baseline (STFT 128x64).
-    version = "V7"  # change this between runs
+    version = "V8"  # change this between runs
     run_name = ""  # Descriptive name for this run (used in results dir)
 
     # Immutable project paths
@@ -76,7 +76,7 @@ class DiffusionConfig:
     # - 'none': no normalization — raw STFT magnitudes passed directly to model
     #           WARNING: model input will be in [0, ~600] range; only use for debugging
     mag_norm_mode = "zscore"
-    mag_norm_clamp_sigma = 4.0  # std devs that map to ±1; values beyond are clamped
+    mag_norm_clamp_sigma = 4.5  # std devs that map to ±1; values beyond are clamped
     mag_norm_epsilon = 1e-8
 
     # Optional: include STFT phase as an additional channel.
@@ -180,8 +180,8 @@ class DiffusionConfig:
     # Training parameters
     learning_rate = 1e-4
     batch_size = 16
-    num_epochs = 25
-    epochs = 25
+    num_epochs = 50
+    epochs = 50
     gradient_accumulation_steps = 1
     num_workers = 0
     mixed_precision = "bf16"  # Use bfloat16 for numerical stability (prevents NaN losses)

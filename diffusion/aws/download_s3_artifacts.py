@@ -73,6 +73,7 @@ from __future__ import annotations
 import argparse
 import boto3
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import List, Optional
 from tqdm import tqdm
@@ -286,17 +287,22 @@ def _download_run(
             print(f"  Would skip {skipped} files (filtered)")
         return [obj["Key"] for obj in filtered_objects], all_keys
     
-    # Download with progress bar
-    for obj in tqdm(filtered_objects, desc=f"  Downloading {run_id}", unit="file"):
+    # Download in parallel (16 threads — S3 handles concurrent GETs well).
+    def _dl(obj):
         s3_key = obj["Key"]
-        # Compute relative path: remove s3_run_prefix from s3_key
         relative_path = s3_key[len(s3_run_prefix):]
         local_path = local_run_dir / relative_path
-        
         local_path.parent.mkdir(parents=True, exist_ok=True)
         s3_client.download_file(bucket, s3_key, str(local_path))
-        downloaded_keys.append(s3_key)
-    
+        return s3_key
+
+    with ThreadPoolExecutor(max_workers=16) as pool:
+        futures = {pool.submit(_dl, obj): obj for obj in filtered_objects}
+        with tqdm(total=len(futures), desc=f"  Downloading {run_id}", unit="file") as bar:
+            for fut in as_completed(futures):
+                downloaded_keys.append(fut.result())
+                bar.update(1)
+
     return downloaded_keys, all_keys
 
 

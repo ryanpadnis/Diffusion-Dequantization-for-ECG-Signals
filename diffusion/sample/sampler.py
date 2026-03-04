@@ -171,15 +171,18 @@ class DiffusionSampler:
         to normalize BOTH condition and real magnitudes.
         """
         from data.utils.transforms import get_transform
-        from data.utils.quantizers import UniformQuantizer
+        from data.utils.quantizers import (
+            UniformQuantizer, LloydMaxQuantizer, MuLawQuantizer,
+            DitheredUniformQuantizer, compute_range_from_tensor,
+        )
 
         # Optional: time-domain low-pass (must match training if enabled).
         raw_signals = self._maybe_pre_lowpass(raw_signals)
 
-        cond_bits = int(params['cond_bits']) #use the conditional data bit sizew
+        cond_bits = int(params['cond_bits']) #use the conditional data bit size
 
         # Per-sample time-domain quantization range from this condition only.
-        from data.utils.quantizers import compute_range_from_tensor
+        quantizer_type = str(self.config.get('quantizer_type', 'uniform')).strip()
         lower_pct = float(self.config.get('quantile_clip_lower', 0.0))
         upper_pct = float(self.config.get('quantile_clip_upper', 100.0))
         lo, hi = compute_range_from_tensor(raw_signals, lower_pct, upper_pct)
@@ -191,7 +194,18 @@ class DiffusionSampler:
         tmin = -peak
         tmax = peak
 
-        q_time = UniformQuantizer(bits=cond_bits, range_min=float(tmin), range_max=float(tmax))
+        # Dispatch on quantizer_type to match training preprocessing exactly.
+        if quantizer_type == 'lloyd_max':
+            q_time = LloydMaxQuantizer(bits=cond_bits, range_min=float(tmin), range_max=float(tmax))
+            q_time.fit(raw_signals.to(self.device))
+        elif quantizer_type == 'mu_law':
+            q_time = MuLawQuantizer(bits=cond_bits, range_min=float(tmin), range_max=float(tmax))
+        elif quantizer_type == 'dithered_uniform':
+            q_time = DitheredUniformQuantizer(bits=cond_bits, range_min=float(tmin), range_max=float(tmax))
+        else:
+            if quantizer_type != 'uniform':
+                print(f'[Sampler] Warning: unknown quantizer_type={quantizer_type!r}; falling back to uniform')
+            q_time = UniformQuantizer(bits=cond_bits, range_min=float(tmin), range_max=float(tmax))
         q_time._meta = {'source': 'per_sample', 'lower_pct': lower_pct, 'upper_pct': upper_pct, 'peak': float(peak)}
         wave_4bit = q_time.quantize(raw_signals.to(self.device))
         self._last_wave_4bit = wave_4bit.detach().clone()

@@ -173,7 +173,66 @@ def _parse_args() -> argparse.Namespace:
 		action="store_true",
 		help="If set, include results_dir/data/<run_id> in the run bundle (can be large).",
 	)
+	p.add_argument(
+		"--config-override",
+		action="append",
+		default=[],
+		metavar="KEY=VALUE",
+		help=(
+			"Override a single config key at runtime: KEY=VALUE (repeatable). "
+			"Values are JSON-parsed when possible, otherwise treated as plain strings. "
+			"If 'version' or 'run_name' are overridden, results_dir and derived dirs are recomputed."
+		),
+	)
 	return p.parse_args()
+
+
+def _apply_config_overrides(config: dict, overrides: list[str]) -> None:
+	"""Parse and apply KEY=VALUE overrides to *config* in-place.
+
+	Values are JSON-decoded when possible (so integers, booleans, floats, lists
+	and dicts all work); otherwise the raw string value is used.
+
+	If ``version`` or ``run_name`` appear in the overrides the results_dir
+	and all derived directory paths are recomputed automatically so they stay
+	consistent with the new values.
+	"""
+	import json as _json
+	import diffusion.settings as _settings
+
+	changed: set[str] = set()
+	for item in overrides or []:
+		if not item:
+			continue
+		if "=" not in item:
+			raise ValueError(f"--config-override: expected KEY=VALUE, got: {item!r}")
+		key, _, val_str = item.partition("=")
+		key = key.strip()
+		if not key:
+			raise ValueError(f"--config-override: empty key in {item!r}")
+		try:
+			val = _json.loads(val_str)
+		except Exception:
+			val = val_str
+		config[key] = val
+		changed.add(key)
+		print(f"[ray_train] Config override: {key} = {val!r}")
+
+	# Recompute results_dir and derived dirs when version / run_name changes.
+	if changed & {"version", "run_name", "results_dir"}:
+		version = str(config.get("version") or getattr(DiffusionConfig, "version", "V1")).strip()
+		run_name = str(config.get("run_name") or "").strip()
+		diffusion_root = Path(str(_settings.DIFFUSION_ROOT))
+		if run_name:
+			results_dir = diffusion_root / "results" / version / run_name
+		else:
+			results_dir = diffusion_root / "results" / version
+		config["results_dir"] = str(results_dir)
+		config["checkpoint_dir"] = str(results_dir / "checkpoints")
+		config["logs_dir"] = str(results_dir / "logs")
+		config["samples_dir"] = str(results_dir / "samples")
+		config["data_dir"] = str(results_dir / "data")
+		print(f"[ray_train] Recomputed results_dir -> {results_dir}")
 
 
 def _parse_kv_list(items: list[str]) -> dict[str, str]:
@@ -260,9 +319,10 @@ def _write_run_metadata(*, results_dir: Path, run_id: str, args: argparse.Namesp
 	git = {}
 	try:
 		# Best-effort: these commands may fail if git isn't available or repo isn't a git checkout.
+		# stderr=DEVNULL suppresses the "not a git repository" message on remote nodes (no .git dir).
 		repo_root = Path(__file__).resolve().parents[2]
-		git["commit"] = subprocess.check_output(["git", "-C", str(repo_root), "rev-parse", "HEAD"], text=True).strip()
-		git["status"] = subprocess.check_output(["git", "-C", str(repo_root), "status", "--porcelain"], text=True).strip()
+		git["commit"] = subprocess.check_output(["git", "-C", str(repo_root), "rev-parse", "HEAD"], text=True, stderr=subprocess.DEVNULL).strip()
+		git["status"] = subprocess.check_output(["git", "-C", str(repo_root), "status", "--porcelain"], text=True, stderr=subprocess.DEVNULL).strip()
 	except Exception:
 		git = {}
 
@@ -596,11 +656,16 @@ def _prepare_s3(
 		config["data_dir"] = str(results_dir / "data" / run_id)
 
 	s3_base = normalize_s3_uri(args.s3)
-	version = str(getattr(DiffusionConfig, "version", "V1"))
+	version = str(config.get("version") or getattr(DiffusionConfig, "version", "V1")).strip()
+	run_name = str(config.get("run_name") or "").strip()
 
 	# Put derived preprocessed data in a shared S3 location (not per-run).
+	# Data is keyed by version only so multiple models on the same data share the cache.
 	config["s3_data_uri"] = join_s3_uri(s3_base, "data", version)
-	s3_runs_parent = join_s3_uri(s3_base, "diffusion-results", version)
+	if run_name:
+		s3_runs_parent = join_s3_uri(s3_base, "diffusion-results", version, run_name)
+	else:
+		s3_runs_parent = join_s3_uri(s3_base, "diffusion-results", version)
 	s3_run_prefix = join_s3_uri(s3_runs_parent, run_id) if run_id else s3_runs_parent
 
 	print(f"[ray_train] S3 run prefix: {s3_run_prefix}")
@@ -721,6 +786,9 @@ def main() -> None:
 	if args.max_samples is not None:
 		config["max_samples"] = int(args.max_samples)
 
+	# Apply --config-override KEY=VALUE patches before anything derives from config.
+	_apply_config_overrides(config, list(getattr(args, "config_override", None) or []))
+
 	if args.resume_from_s3:
 		if not args.s3:
 			print("[ray_train] Error: --resume-from-s3 requires --s3")
@@ -734,7 +802,7 @@ def main() -> None:
 
 		# Reconstruct where runs live
 		s3_base = normalize_s3_uri(args.s3)
-		version = str(getattr(DiffusionConfig, "version", "V1"))
+		version = str(config.get("version") or getattr(DiffusionConfig, "version", "V1")).strip()
 		s3_runs_parent = join_s3_uri(s3_base, "diffusion-results", version)
 
 		target = args.resume_from_s3
@@ -969,14 +1037,16 @@ def main() -> None:
 		run_id = str(config.get("run_id") or "")
 
 		# Upload destination:
-		#   s3://bucket[/prefix]/diffusion-results/<version>/<run_id>/...
-		# Keep it simple and deterministic.
-		version = str(getattr(DiffusionConfig, "version", "V1"))
-		if run_id:
-			s3_runs_parent = join_s3_uri(s3_base, "diffusion-results", version)
-			s3_run_prefix = join_s3_uri(s3_runs_parent, run_id)
+		#   s3://bucket[/prefix]/diffusion-results/<version>[/<run_name>]/<run_id>/...
+		version = str(config.get("version") or getattr(DiffusionConfig, "version", "V1")).strip()
+		run_name = str(config.get("run_name") or "").strip()
+		if run_name:
+			s3_runs_parent = join_s3_uri(s3_base, "diffusion-results", version, run_name)
 		else:
 			s3_runs_parent = join_s3_uri(s3_base, "diffusion-results", version)
+		if run_id:
+			s3_run_prefix = join_s3_uri(s3_runs_parent, run_id)
+		else:
 			s3_run_prefix = s3_runs_parent
 
 		# Upload the artifact subfolders plus derived training data under results_dir/data.
@@ -1026,8 +1096,12 @@ def main() -> None:
 	if args.s3 and is_remote:
 		from diffusion.aws.s3_io import normalize_s3_uri, join_s3_uri, prune_runs
 		s3_base = normalize_s3_uri(args.s3)
-		version = str(getattr(DiffusionConfig, "version", "V1"))
-		s3_runs_parent = join_s3_uri(s3_base, "diffusion-results", version)
+		version = str(config.get("version") or getattr(DiffusionConfig, "version", "V1")).strip()
+		run_name = str(config.get("run_name") or "").strip()
+		if run_name:
+			s3_runs_parent = join_s3_uri(s3_base, "diffusion-results", version, run_name)
+		else:
+			s3_runs_parent = join_s3_uri(s3_base, "diffusion-results", version)
 		if args.keep_last is not None and int(args.keep_last) > 0:
 			print(f"[ray_train] Pruning S3 runs under {s3_runs_parent} (keep_last_n={int(args.keep_last)})")
 			prune_runs(s3_runs_parent, keep_last_n=int(args.keep_last))

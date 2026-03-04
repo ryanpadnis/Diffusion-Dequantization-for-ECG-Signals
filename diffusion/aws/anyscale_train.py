@@ -71,6 +71,25 @@ def _parse_args() -> argparse.Namespace:
         default="https://download.pytorch.org/whl/cu118",
         help="Index URL to use for torch wheels (default: PyTorch cu118 index)",
     )
+    p.add_argument(
+        "--config-override",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help=(
+            "Override a config key passed to ray_train: KEY=VALUE (repeatable). "
+            "Examples: version=V8, run_name=uniform__linear, quantizer_type=lloyd_max, noise_schedule_type=cosine."
+        ),
+    )
+
+    # Sampling after training (runs on the same GPU node, same remote session).
+    p.add_argument("--sample-after-train", action="store_true",
+                   help="Run sampling immediately after training on the same cluster session.")
+    p.add_argument("--sample-version", type=str, default=None,
+                   help="Version path for sampling, e.g. V8/uniform__linear (default: derived from config overrides).")
+    p.add_argument("--sample-checkpoint", type=str, default="best_model.pt")
+    p.add_argument("--num-samples", type=int, default=16)
+    p.add_argument("--num-trajectories", type=int, default=1)
 
     return p.parse_args()
 
@@ -217,8 +236,55 @@ def _remote_script(args: argparse.Namespace, *, code_bundle_s3_uri: str) -> str:
         train_flags.extend(["--max-batches", str(int(args.max_batches))])
     if args.max_samples is not None:
         train_flags.extend(["--max-samples", str(int(args.max_samples))])
+    for override in (args.config_override or []):
+        train_flags.extend(["--config-override", override])
 
     train_cmd = " ".join(shlex.quote(x) for x in train_flags)
+
+    # Build optional post-training sampling command (same GPU session).
+    sample_block = ""
+    if getattr(args, 'sample_after_train', False):
+        # Derive version/run_name from config overrides.
+        overrides_dict = {}
+        for ov in (args.config_override or []):
+            k, _, v = ov.partition("=")
+            overrides_dict[k.strip()] = v.strip()
+        version = getattr(args, 'sample_version', None) or (
+            f"{overrides_dict.get('version', 'V8')}/{overrides_dict.get('run_name', 'run')}"
+        )
+        sample_flags = [
+            "python", "-m", "diffusion.train.ray_sample",
+            "--ray-address", "auto",
+            "--ray-num-gpus", str(float(args.ray_num_gpus)),
+            "--s3", str(args.s3),
+            "--s3-region", str(args.region),
+            "--version", version,
+            "--checkpoint", str(getattr(args, 'sample_checkpoint', 'best_model.pt')),
+            "--num-samples", str(int(getattr(args, 'num_samples', 16))),
+            "--num-trajectories", str(int(getattr(args, 'num_trajectories', 1))),
+        ]
+        sample_cmd_str = " ".join(shlex.quote(x) for x in sample_flags)
+        sample_block = f"""
+# Resolve the run_id written by training and pass it to sampling.
+RUN_ID=$(python - <<'PY'
+import os, sys
+try:
+    from diffusion.aws.s3_io import normalize_s3_uri, join_s3_uri, list_run_prefixes
+    s3_base = {str(args.s3)!r}
+    version = {version!r}
+    prefix = join_s3_uri(normalize_s3_uri(s3_base), 'diffusion-results', version)
+    runs = sorted(list_run_prefixes(prefix), key=lambda x: x[1])
+    if runs:
+        print(runs[-1][0].rstrip('/').split('/')[-1])
+    else:
+        print('NOTFOUND', file=sys.stderr); sys.exit(1)
+except Exception as e:
+    print(f'ERROR: {{e}}', file=sys.stderr); sys.exit(1)
+PY
+)
+echo "[anyscale_train] Sampling with run_id=$RUN_ID"
+{sample_cmd_str} --run-id "$RUN_ID"
+"""
 
     # Use a bootstrap task to ensure the worker has deps. We do a quick import test first.
     # Note: this installs into the worker's Python environment; it persists for the node lifetime.
@@ -362,7 +428,8 @@ PY
 
 # Launch the main training script
 {train_cmd}
-"""
+
+{sample_block}"""
     return script
 
 
@@ -491,21 +558,23 @@ def main() -> None:
             "-m",
             "diffusion.train.ray_train",
             "--no-ray",
-            "--prepare-s3-data",  # Force regeneration (not --prepare-s3-data-if-missing)
+            "--prepare-s3-data-if-missing",  # Skip if already in S3
             "--s3",
             str(args.s3),
             "--s3-region",
             str(args.region),
         ]
+        for override in (args.config_override or []):
+            local_cmd.extend(["--config-override", override])
 
         # Use uv if available (consistent interpreter / deps).
         if _have("uv"):
             local_cmd = ["uv", "run", *local_cmd]
 
-        print("[anyscale_train] Running local preprocessing with current config...")
-        print("[anyscale_train] This will regenerate and upload preprocessed data to S3.")
+        print("[anyscale_train] Checking S3 for existing preprocessed data...")
+        print("[anyscale_train] (Will preprocess and upload only if missing.)")
         subprocess.run(local_cmd, check=True)
-        print("[anyscale_train] Local preprocessing complete.")
+        print("[anyscale_train] Preprocessing check complete.")
     
     # Skip automatic S3 data check - let the remote workspace use existing S3 data
     # (Local preprocessing fails on Mac due to torch compatibility issues)
@@ -548,6 +617,11 @@ def main() -> None:
         _remote_process.wait()
     except KeyboardInterrupt:
         _signal_handler(signal.SIGINT, None)
+
+    rc = _remote_process.returncode
+    if rc != 0:
+        print(f"[anyscale_train] Remote command exited with code {rc}")
+        sys.exit(rc)
 
 
 if __name__ == "__main__":

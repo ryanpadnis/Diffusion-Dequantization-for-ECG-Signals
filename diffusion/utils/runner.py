@@ -16,7 +16,14 @@ import tempfile
 import torch
 
 from data.utils.transforms import get_transform, AVAILABLE_TRANSFORMS, SpectrogramMagNormalizer
-from data.utils.quantizers import UniformQuantizer, compute_range_from_tensor
+from data.utils.quantizers import (
+    UniformQuantizer,
+    LloydMaxQuantizer,
+    MuLawQuantizer,
+    DitheredUniformQuantizer,
+    compute_range_from_tensor,
+)
+from diffusion.utils.torch_utils import resolve_torch_dtype as _resolve_torch_dtype
 
 
 def _per_sample_symmetric_peak(signals_time: torch.Tensor, *, lower_pct: float, upper_pct: float) -> torch.Tensor:
@@ -70,7 +77,92 @@ def _uniform_quantize_per_sample(signals_time: torch.Tensor, *, bits: int, peak:
     return q.view_as(signals_time)
 
 
-def _resolve_torch_dtype(config: dict, device: str) -> torch.dtype:
+def _lloyd_max_quantize_per_sample(
+    signals_time: torch.Tensor,
+    *,
+    bits: int,
+    peak: torch.Tensor,
+) -> torch.Tensor:
+    """Lloyd-Max quantize each sample using a per-sample symmetric range.
+
+    Fits a single global codebook on all samples normalised to [-1, 1],
+    then scales the result back to each sample's original range.
+    This amortises the O(N*K*iter) fitting cost across the batch.
+    """
+    x = signals_time
+    if x.ndim != 2:
+        x = x.view(x.shape[0], -1)
+    peak_s = peak.clamp(min=1e-12)                      # [N, 1]
+    x_norm = torch.clamp(x / peak_s, -1.0, 1.0)        # [N, T] in [-1, 1]
+
+    # Fit a single normalised codebook on the full batch.
+    q = LloydMaxQuantizer(bits=bits, range_min=-1.0, range_max=1.0)
+    q.fit(x_norm)
+
+    q_norm = q.quantize(x_norm)          # centroids still in [-1, 1]
+    result = q_norm * peak_s             # scale back to original range
+    return result.view_as(signals_time)
+
+
+def _mu_law_quantize_per_sample(
+    signals_time: torch.Tensor,
+    *,
+    bits: int,
+    peak: torch.Tensor,
+    mu: float = 255.0,
+) -> torch.Tensor:
+    """μ-law companding quantize each sample using a per-sample symmetric range."""
+    x = signals_time
+    if x.ndim != 2:
+        x = x.view(x.shape[0], -1)
+    peak_s = peak.clamp(min=1e-12)                      # [N, 1]
+    x_norm = torch.clamp(x / peak_s, -1.0, 1.0)
+
+    # Compress.
+    y = x_norm.sign() * torch.log1p(mu * x_norm.abs()) / math.log(1.0 + mu)
+
+    # Uniform-quantise in compressed domain.
+    levels = float(2 ** int(bits))
+    step = 2.0 / levels
+    idx = torch.floor((y + 1.0) / step).clamp(0, levels - 1)
+    y_q = idx * step - 1.0 + 0.5 * step
+
+    # Expand back.
+    x_q_norm = y_q.sign() * ((1.0 + mu) ** y_q.abs() - 1.0) / mu
+    result = x_q_norm * peak_s
+    return result.view_as(signals_time)
+
+
+def _dithered_uniform_quantize_per_sample(
+    signals_time: torch.Tensor,
+    *,
+    bits: int,
+    peak: torch.Tensor,
+) -> torch.Tensor:
+    """Dithered uniform quantize each sample using a per-sample symmetric range.
+
+    Adds TPDF dither (±1 LSB triangular noise) before uniform quantisation so
+    quantisation error is uncorrelated white noise rather than harmonic distortion.
+    """
+    x = signals_time
+    if x.ndim != 2:
+        x = x.view(x.shape[0], -1)
+    peak_s = peak.clamp(min=1e-12)                      # [N, 1]
+
+    levels = float(2 ** int(bits))
+    step = (2.0 * peak_s) / levels                      # [N, 1]  LSB width per sample
+    step = torch.where(step.abs() < 1e-12, torch.ones_like(step), step)
+
+    # TPDF dither: sum of two U[-step/2, step/2] variables.
+    half = step / 2.0
+    u1 = torch.empty_like(x).uniform_(-1.0, 1.0) * half
+    u2 = torch.empty_like(x).uniform_(-1.0, 1.0) * half
+    dither = u1 + u2
+
+    x_dithered = torch.clamp(x + dither, -peak_s, peak_s)
+    idx = torch.floor((x_dithered + peak_s) / step).clamp(0, levels - 1)
+    q = idx * step - peak_s + 0.5 * step
+    return q.view_as(signals_time)
     dtype_val = config.get('torch_dtype', 'float32')
     if isinstance(dtype_val, torch.dtype):
         dtype = dtype_val
@@ -200,13 +292,19 @@ def create_quantizer(config: dict, signals: torch.Tensor) -> UniformQuantizer:
     return q
 
 
-def create_time_quantizer(config: dict, signals_time: torch.Tensor, bits: int) -> UniformQuantizer:
-    """Create a uniform quantizer for time-domain signals.
+def create_time_quantizer(config: dict, signals_time: torch.Tensor, bits: int):
+    """Create and (optionally) fit a time-domain quantizer from config.
+
+    Dispatches on ``config['quantizer_type']``:
+      * ``'uniform'``   – symmetric uniform quantizer (default)
+      * ``'lloyd_max'`` – optimal Lloyd-Max quantizer, fitted on *signals_time*
+      * ``'mu_law'``    – μ-law companding quantizer (no fitting required)
 
     Uses percentile clipping and a symmetric range around 0 for stability.
     """
     lower_pct = float(config.get('quantile_clip_lower', 0.0))
     upper_pct = float(config.get('quantile_clip_upper', 100.0))
+    quantizer_type = str(config.get('quantizer_type', 'uniform')).strip()
 
     lo, hi = compute_range_from_tensor(signals_time, lower_pct, upper_pct)
     peak = max(abs(lo), abs(hi))
@@ -215,16 +313,36 @@ def create_time_quantizer(config: dict, signals_time: torch.Tensor, bits: int) -
     if peak <= 0:
         peak = 1.0
 
-    q = UniformQuantizer(bits=bits, range_min=-peak, range_max=peak)
-    q._meta = {
+    rmin, rmax = -peak, peak
+    meta = {
         'lower_pct': lower_pct,
         'upper_pct': upper_pct,
         'symmetric': True,
         'lo': float(lo),
         'hi': float(hi),
         'peak': float(peak),
+        'quantizer_type': quantizer_type,
     }
-    return q
+
+    if quantizer_type == 'lloyd_max':
+        q = LloydMaxQuantizer(bits=bits, range_min=rmin, range_max=rmax)
+        q.fit(signals_time)
+        q._meta = meta
+        return q
+    elif quantizer_type == 'mu_law':
+        q = MuLawQuantizer(bits=bits, range_min=rmin, range_max=rmax)
+        q._meta = meta
+        return q
+    elif quantizer_type == 'dithered_uniform':
+        q = DitheredUniformQuantizer(bits=bits, range_min=rmin, range_max=rmax)
+        q._meta = meta
+        return q
+    else:
+        if quantizer_type != 'uniform':
+            print(f'[create_time_quantizer] Unknown quantizer_type={quantizer_type!r}; falling back to uniform')
+        q = UniformQuantizer(bits=bits, range_min=rmin, range_max=rmax)
+        q._meta = meta
+        return q
 
 
 def build_diffuser(config: dict):
@@ -358,7 +476,7 @@ def process_data_before_training(config:dict):
     quantizer_type = config.get('quantizer_type', 'uniform')
     transform_type = config.get('transform_type', 'stft')
     cond_bits = config.get('bit_size', 4)  # Condition dataset bit depth
-    real_bits = config.get('real_bit_size', 16)  # Real data bit depth
+    real_bits = config.get('real_bit_size', 11)  # Real data bit depth
 
     # Optional: apply a time-domain low-pass before quantization/transform.
     lp_cfg = config.get('pre_lowpass') if isinstance(config.get('pre_lowpass'), dict) else {}
@@ -587,10 +705,26 @@ def process_data_before_training(config:dict):
         upper_pct = float(config.get('quantile_clip_upper', 100.0))
 
         if time_quant_mode == 'per_sample':
-            print(f"[train_diffuser] Time-domain quantization mode: per_sample (pct={lower_pct:g}-{upper_pct:g})")
+            print(f"[train_diffuser] Time-domain quantization mode: per_sample ({quantizer_type}, pct={lower_pct:g}-{upper_pct:g})")
             peak = _per_sample_symmetric_peak(signals, lower_pct=lower_pct, upper_pct=upper_pct)  # [N,1]
-            cond_time = _uniform_quantize_per_sample(signals, bits=int(cond_bits), peak=peak)
-            real_time = signals if assume_raw_is_real_bits else _uniform_quantize_per_sample(signals, bits=int(real_bits), peak=peak)
+
+            if quantizer_type == 'lloyd_max':
+                print("[train_diffuser] Fitting Lloyd-Max codebook on normalised batch (this may take a moment)...")
+                cond_time = _lloyd_max_quantize_per_sample(signals, bits=int(cond_bits), peak=peak)
+                real_time = signals if assume_raw_is_real_bits else _lloyd_max_quantize_per_sample(signals, bits=int(real_bits), peak=peak)
+            elif quantizer_type == 'mu_law':
+                print("[train_diffuser] Applying μ-law companding quantization...")
+                cond_time = _mu_law_quantize_per_sample(signals, bits=int(cond_bits), peak=peak)
+                real_time = signals if assume_raw_is_real_bits else _mu_law_quantize_per_sample(signals, bits=int(real_bits), peak=peak)
+            elif quantizer_type == 'dithered_uniform':
+                print("[train_diffuser] Applying dithered uniform quantization (TPDF dither)...")
+                cond_time = _dithered_uniform_quantize_per_sample(signals, bits=int(cond_bits), peak=peak)
+                real_time = signals if assume_raw_is_real_bits else _dithered_uniform_quantize_per_sample(signals, bits=int(real_bits), peak=peak)
+            else:
+                if quantizer_type != 'uniform':
+                    print(f"[train_diffuser] Warning: unknown quantizer_type={quantizer_type!r}; falling back to uniform")
+                cond_time = _uniform_quantize_per_sample(signals, bits=int(cond_bits), peak=peak)
+                real_time = signals if assume_raw_is_real_bits else _uniform_quantize_per_sample(signals, bits=int(real_bits), peak=peak)
 
             # For debug printing we still build a representative quantizer from sample_0 only.
             try:
@@ -776,7 +910,7 @@ def process_data_before_training(config:dict):
         real_data = torch.cat([real_data, real_phase_ch], dim=1)
 
     # Cast tensors to specified dtype 
-    train_dtype = _resolve_torch_dtype(config, device)
+    train_dtype = _resolve_torch_dtype(config, torch.device(device) if isinstance(device, str) else device)
     cond_data = cond_data.to(dtype=train_dtype)
     real_data = real_data.to(dtype=train_dtype)
 

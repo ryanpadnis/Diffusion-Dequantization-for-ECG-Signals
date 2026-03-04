@@ -7,6 +7,9 @@ from tqdm import tqdm
 from data.utils import settings
 
 
+
+
+
 def _iter_normalized_pts(normalized_dir: Path) -> list[Path]:
     normalized_dir = Path(normalized_dir)
     if not normalized_dir.exists():
@@ -94,3 +97,5 @@ if __name__ == "__main__":
         sequence_length=args.sequence_length,
         stride=args.stride,
     )
+
+
