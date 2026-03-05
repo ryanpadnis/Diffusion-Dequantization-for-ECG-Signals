@@ -29,14 +29,19 @@ All scripts use `uv run` (no activation needed):
 
 ```bash
 # Load VitalDB records from kaggle
-uv run python data/load/download_kaggle_mitdb.py
+uv run python data/pipeline/download.py
+
+# Normalize
+uv run python data/pipeline/normalize.py
 
 # Chunk signals into sequences
-uv run python data/load/create_chunks.py
+uv run python data/pipeline/chunk.py
 
-# Process with quantizing and then STFT
-uv run python data/preprocess/process.py
+# Process with quantizing 
+uv run python data/pipeline/quantize.py
 
+# Run transform
+uv run python data/pipeline/transform.py
 ```
 
 ## Data Pipeline
