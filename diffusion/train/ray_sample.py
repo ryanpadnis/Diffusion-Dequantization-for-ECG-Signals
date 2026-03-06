@@ -192,6 +192,39 @@ def _parse_args():
     p.add_argument("--num-trajectories", type=int, default=1, help="Number of random variations per test sample")
     p.add_argument("--batch-size", type=int, default=16, help="Batch size for sampling")
     p.add_argument("--use-ddim", action="store_true", help="Use DDIM sampler")
+
+    p.add_argument(
+        "--select",
+        type=str,
+        choices=["last", "headtail"],
+        default="last",
+        help="How to pick conditions from the holdout pool (default: last)",
+    )
+    p.add_argument("--head", type=int, default=8, help="Head count for --select headtail")
+    p.add_argument("--tail", type=int, default=8, help="Tail count for --select headtail")
+    p.add_argument(
+        "--holdout-count",
+        type=int,
+        default=None,
+        help="Override holdout size (default: use config test_holdout_count)",
+    )
+    p.add_argument(
+        "--holdout-from-end",
+        action="store_true",
+        default=None,
+        help="Override holdout slice direction (use last holdout-count items)",
+    )
+    p.add_argument(
+        "--holdout-from-start",
+        action="store_true",
+        default=None,
+        help="Override holdout slice direction (use first holdout-count items)",
+    )
+    p.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Delete existing samples/ before writing new ones",
+    )
     
     # Ray args (consumed by launcher, but good to have)
     p.add_argument("--ray-address", type=str, default=None)
@@ -292,10 +325,19 @@ def _run_sampling_job(args: dict) -> None:
     raw_path = _resolve_raw_data_path(config=sampler.config, s3_base=s3_base, version=version, run_id=run_id)
     print(f"[ray_sample] Loading raw time-domain signals from {raw_path}")
     signals = _extract_signals(torch.load(raw_path))
+
+    if hasattr(signals, "ndim") and int(getattr(signals, "ndim")) != 2:
+        # Ensure [N, T]
+        signals = signals.view(signals.shape[0], -1)
         
     # Select N *distinct* samples from the fixed test holdout.
-    holdout_n = int(sampler.config.get('test_holdout_count', 0) or 0)
-    holdout_from_end = bool(sampler.config.get('test_holdout_from_end', True))
+    holdout_n = int(args.get("holdout_count") if args.get("holdout_count") is not None else (sampler.config.get('test_holdout_count', 0) or 0))
+    if args.get("holdout_from_start"):
+        holdout_from_end = False
+    elif args.get("holdout_from_end"):
+        holdout_from_end = True
+    else:
+        holdout_from_end = bool(sampler.config.get('test_holdout_from_end', True))
 
     total_files = int(signals.shape[0]) if hasattr(signals, "shape") else len(signals)
     if holdout_n > 0 and total_files > holdout_n:
@@ -309,31 +351,37 @@ def _run_sampling_job(args: dict) -> None:
         available_pool = signals
         print(f"[ray_sample] Selecting from full dataset ({total_files} items)")
         
+    selection = str(args.get("select") or "last").strip().lower()
     num_needed = int(args.get("num_samples") or 16)
-    if len(available_pool) < num_needed:
-        print(f"[ray_sample] Warning: Requested {num_needed} samples but only {len(available_pool)} available.")
-        num_needed = len(available_pool)
-        
-    # Pick distinct indices (deterministically if possible for reproducibility)
-    # We just take the *last* N samples to be consistent? Or random?
-    # User said "preprocess 16 different segments... going backwards".
-    # So taking the last N is a good strategy.
-    
-    # Last N:
-    selected_signals = available_pool[-num_needed:]
+
+    if selection == "headtail":
+        head = int(args.get("head") or 0)
+        tail = int(args.get("tail") or 0)
+        need = head + tail
+        if need <= 0:
+            raise ValueError("--head + --tail must be > 0 for --select headtail")
+        if len(available_pool) < need:
+            raise ValueError(f"Holdout pool has only {len(available_pool)} items; need head+tail={need}")
+        selected_signals = torch.cat([available_pool[:head], available_pool[-tail:]], dim=0)
+        num_needed = int(selected_signals.shape[0])
+    else:
+        if len(available_pool) < num_needed:
+            print(f"[ray_sample] Warning: Requested {num_needed} samples but only {len(available_pool)} available.")
+            num_needed = len(available_pool)
+        selected_signals = available_pool[-num_needed:]
     # Reverse to match "stack them jointly going backwards" comment?
     # selected_signals = selected_signals.flip(dims=[0]) 
     
-    print(f"[ray_sample] Selected {len(selected_signals)} samples for generation.")
+    print(f"[ray_sample] Selection={selection}; selected {len(selected_signals)} samples for generation.")
     
     # 5. Run Sampling
     # sampler.sample() handles the loop over conditions.
     # It saves to results_dir/version/samples/...
     
-    # We might want to clear old samples?
-    # shutil.rmtree(local_run_dir / "samples", ignore_errors=True)
+    if bool(args.get("overwrite")):
+        shutil.rmtree(local_run_dir / "samples", ignore_errors=True)
     
-    results = sampler.sample(
+    _ = sampler.sample(
         raw_condition_signals=selected_signals,
         num_inference_steps=None, # Use config default
         use_ddim=bool(args.get("use_ddim") or False),

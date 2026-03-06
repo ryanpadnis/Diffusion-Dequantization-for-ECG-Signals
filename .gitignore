@@ -284,6 +284,64 @@ diffusion/**/logs/
 !diffusion/results/V4/20260213_202346/samples/**/*.pkl
 !diffusion/results/V4/20260213_202346/samples/**/*.pickle
 
+# Opt-in: commit V9 sample artifacts (all 12 models)
+!diffusion/results/V9/
+!diffusion/results/V9/uniform__linear/
+!diffusion/results/V9/uniform__linear/20260305_190038/
+!diffusion/results/V9/uniform__linear/20260305_190038/samples/
+!diffusion/results/V9/uniform__linear/20260305_190038/samples/**
+!diffusion/results/V9/uniform__cosine/
+!diffusion/results/V9/uniform__cosine/20260305_203731/
+!diffusion/results/V9/uniform__cosine/20260305_203731/samples/
+!diffusion/results/V9/uniform__cosine/20260305_203731/samples/**
+!diffusion/results/V9/uniform__sigmoid/
+!diffusion/results/V9/uniform__sigmoid/20260305_205507/
+!diffusion/results/V9/uniform__sigmoid/20260305_205507/samples/
+!diffusion/results/V9/uniform__sigmoid/20260305_205507/samples/**
+!diffusion/results/V9/lloyd_max__linear/
+!diffusion/results/V9/lloyd_max__linear/20260305_211221/
+!diffusion/results/V9/lloyd_max__linear/20260305_211221/samples/
+!diffusion/results/V9/lloyd_max__linear/20260305_211221/samples/**
+!diffusion/results/V9/lloyd_max__cosine/
+!diffusion/results/V9/lloyd_max__cosine/20260305_212954/
+!diffusion/results/V9/lloyd_max__cosine/20260305_212954/samples/
+!diffusion/results/V9/lloyd_max__cosine/20260305_212954/samples/**
+!diffusion/results/V9/lloyd_max__sigmoid/
+!diffusion/results/V9/lloyd_max__sigmoid/20260305_214732/
+!diffusion/results/V9/lloyd_max__sigmoid/20260305_214732/samples/
+!diffusion/results/V9/lloyd_max__sigmoid/20260305_214732/samples/**
+!diffusion/results/V9/mu_law__linear/
+!diffusion/results/V9/mu_law__linear/20260305_220511/
+!diffusion/results/V9/mu_law__linear/20260305_220511/samples/
+!diffusion/results/V9/mu_law__linear/20260305_220511/samples/**
+!diffusion/results/V9/mu_law__cosine/
+!diffusion/results/V9/mu_law__cosine/20260305_222240/
+!diffusion/results/V9/mu_law__cosine/20260305_222240/samples/
+!diffusion/results/V9/mu_law__cosine/20260305_222240/samples/**
+!diffusion/results/V9/mu_law__sigmoid/
+!diffusion/results/V9/mu_law__sigmoid/20260305_224021/
+!diffusion/results/V9/mu_law__sigmoid/20260305_224021/samples/
+!diffusion/results/V9/mu_law__sigmoid/20260305_224021/samples/**
+!diffusion/results/V9/dithered_uniform__linear/
+!diffusion/results/V9/dithered_uniform__linear/20260305_225756/
+!diffusion/results/V9/dithered_uniform__linear/20260305_225756/samples/
+!diffusion/results/V9/dithered_uniform__linear/20260305_225756/samples/**
+!diffusion/results/V9/dithered_uniform__cosine/
+!diffusion/results/V9/dithered_uniform__cosine/20260305_231515/
+!diffusion/results/V9/dithered_uniform__cosine/20260305_231515/samples/
+!diffusion/results/V9/dithered_uniform__cosine/20260305_231515/samples/**
+!diffusion/results/V9/dithered_uniform__sigmoid/
+!diffusion/results/V9/dithered_uniform__sigmoid/20260306_002946/
+!diffusion/results/V9/dithered_uniform__sigmoid/20260306_002946/samples/
+!diffusion/results/V9/dithered_uniform__sigmoid/20260306_002946/samples/**
+
+# Override general artifact ignores for all V9 samples
+!diffusion/results/V9/**/*.pt
+!diffusion/results/V9/**/*.npy
+!diffusion/results/V9/**/*.json
+!diffusion/results/V9/**/*.png
+!diffusion/results/V9/**/*.pkl
+
 # Opt-in: commit curated sample artifacts
 #
 # Workflow:

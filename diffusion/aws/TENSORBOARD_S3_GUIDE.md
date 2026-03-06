@@ -5,7 +5,7 @@
 ### Already Configured
 
 Tensorboard logging is **already enabled** in the trainer:
-- Logs are written to `logs_dir/diffusion_training/` (configured in training)
+- Logs are written under `logs_dir/<run_id>/diffusion_training/` (configured in training)
 - Logs are automatically flushed after each epoch and at training completion
 - Metrics logged: train/val loss, learning rate, memory stats, advanced metrics
 - Uses Accelerate's built-in tensorboard integration
@@ -15,7 +15,7 @@ Tensorboard logging is **already enabled** in the trainer:
 
 Training will print the tensorboard logs location:
 ```
-[Trainer] Tensorboard logs: /path/to/logs/diffusion_training
+[Trainer] Tensorboard logs: /path/to/logs/<run_id>/diffusion_training
 ```
 
 On remote GPU worker, logs are synced to S3:
@@ -34,21 +34,32 @@ uv run python -m diffusion.aws.download_s3_artifacts \
   --region us-east-1 \
   --run-id 20260212_211925
 
-# Start tensorboard
-uv run tensorboard --logdir  s3://anyscale-production-data-cld-uvdckbb6ukmk9fu8g3nxxudemt/ee269project/diffusion-results/V1/20260212_211925/logs/20260212_211925/diffusion_training
+# Start tensorboard (point at the *local* downloaded logs)
+uv run tensorboard \
+  --logdir diffusion/results/V1/20260212_211925/logs/20260212_211925/diffusion_training \
+  --host 127.0.0.1 \
+  --port 6006
 
 # Open browser
-open http://localhost:6006
+open http://127.0.0.1:6006
+
+# If you see: "TensorBoard could not bind to port 6006"
+# retry with another port (e.g. 6008):
+# uv run tensorboard --logdir ... --host 127.0.0.1 --port 6008
 ```
 
-### View Tensorboard from S3 (without downloading)
+
+
+### View Tensorboard via S3 sync (minimal download)
 
 ```bash
-# Download only logs folder
+# Sync only the logs folder locally
 aws s3 sync s3://YOUR_BUCKET/ee269project/diffusion-results/V1/20260204_215551/logs/ \
   ./temp_logs/
 
-uv run tensorboard --logdir ./temp_logs
+# The synced structure is typically:
+# ./temp_logs/<run_id>/diffusion_training/events.out.tfevents.*
+uv run tensorboard --logdir ./temp_logs/20260204_215551/diffusion_training
 ```
 
 ## S3 Artifact Management
@@ -120,8 +131,9 @@ diffusion/results/V1/
 │   │   ├── checkpoint_epoch_1.pt
 │   │   └── ...
 │   ├── logs/
-│   │   └── diffusion_training/
-│   │       └── events.out.tfevents.*  # Tensorboard logs
+│   │   └── 20260204_215551/
+│   │       └── diffusion_training/
+│   │           └── events.out.tfevents.*  # Tensorboard logs
 │   ├── samples/
 │   │   ├── epoch_1_samples.png
 │   │   └── ...
@@ -163,7 +175,7 @@ uv run python -m diffusion.aws.download_s3_artifacts \
   --delete-after
 
 # 2. View tensorboard
-uv run tensorboard --logdir diffusion/results/V1/20260204_215551/logs
+uv run tensorboard --logdir diffusion/results/V1/20260204_215551/logs/20260204_215551/diffusion_training
 
 # 3. Load checkpoint for sampling (if needed locally)
 # Checkpoint is now at: diffusion/results/V1/20260204_215551/checkpoints/best_model.pt
@@ -179,7 +191,7 @@ uv run python -m diffusion.aws.download_s3_artifacts \
   --run-id 20260204_215551
 
 # Analyze locally
-uv run tensorboard --logdir diffusion/results/V1/20260204_215551/logs
+uv run tensorboard --logdir diffusion/results/V1/20260204_215551/logs/20260204_215551/diffusion_training
 ```
 
 ### Clean Up Old Runs
@@ -261,7 +273,7 @@ uv run tensorboard --logdir <path>
 
 Check that logs directory exists and has event files:
 ```bash
-ls -R diffusion/results/V1/20260204_215551/logs/
+ls -R diffusion/results/V1/20260204_215551/logs/20260204_215551/diffusion_training/
 ```
 
 Should see files like `events.out.tfevents.*`
