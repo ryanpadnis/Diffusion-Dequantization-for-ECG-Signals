@@ -308,6 +308,15 @@ diffusion/**/logs/
 !diffusion/results/V9/lloyd_max__cosine/20260305_212954/samples/**
 !diffusion/results/V9/lloyd_max__sigmoid/
 !diffusion/results/V9/lloyd_max__sigmoid/20260305_214732/
+
+# Opt-in: commit V10 sample artifacts (all models / all runs)
+# This un-ignores ONLY per-run samples folders:
+#   diffusion/results/V10/<model>/<run_id>/samples/**
+!diffusion/results/V10/
+!diffusion/results/V10/*/
+!diffusion/results/V10/*/*/
+!diffusion/results/V10/*/*/samples/
+!diffusion/results/V10/*/*/samples/**
 !diffusion/results/V9/lloyd_max__sigmoid/20260305_214732/samples/
 !diffusion/results/V9/lloyd_max__sigmoid/20260305_214732/samples/**
 !diffusion/results/V9/mu_law__linear/

@@ -1,0 +1,8 @@
+{
+  "improvement_pct_spec": 80.92934568520222,
+  "improvement_pct_time": 84.94920410244504,
+  "mse_spec_mag(cond4_vs_target)": 0.16973252594470978,
+  "mse_spec_mag(gen_norm_vs_target)": 0.03236910328269005,
+  "mse_time(cond4_vs_target)": 0.1260555237531662,
+  "mse_time(gen_vs_target)": 0.018972359597682953
+}
