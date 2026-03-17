@@ -15,6 +15,12 @@ from diffusion.utils.metrics import (
     energy_ratio,
     band_noise_energy_fractions,
     noise_energy_fraction_envelope,
+    mse,
+    nmse,
+    l1_fraction,
+    prd,
+    correlation,
+    snr_db,
     EnergyMetrics,
     compute_energy_metrics,
     print_energy_metrics,
@@ -75,12 +81,24 @@ def demonstrate_individual_metrics():
     print(".4f")
 
     # Create EnergyMetrics object
+    mse_val = mse(candidate, ref)
+    nmse_val = nmse(candidate, ref)
+    l1_val = l1_fraction(candidate, ref)
+    prd_val = prd(candidate, ref)
+    corr_val = correlation(candidate, ref)
+    snr_val = snr_db(candidate, ref)
     metrics = EnergyMetrics(
         nef=nef,
         energy_ratio=er,
         band_nefs=band_nefs,
         envelope_nef=env_nef,
-        n_bands=4
+        n_bands=4,
+        mse=mse_val,
+        nmse=nmse_val,
+        l1_fraction=l1_val,
+        prd=prd_val,
+        correlation=corr_val,
+        snr_db=snr_val,
     )
 
     print("\nEnergyMetrics summary:")

@@ -1,0 +1,72 @@
+{
+  "sample_dir": "diffusion/results/V9/lloyd_max__sigmoid/20260305_214732/samples/ddpm/sample_10",
+  "pipeline_transform": "",
+  "sampler_type": "ddpm",
+  "metrics": {
+    "mse_spec_mag(cond4_vs_target)": 0.05500311776995659,
+    "mse_spec_mag(generated_vs_target)": 3.688629627227783,
+    "mse_spec_log1p(cond4_vs_target)": 0.02273874543607235,
+    "mse_spec_log1p(generated_vs_target)": 0.12249919772148132,
+    "mse_time(cond4_vs_target)": 0.0009458439308218658,
+    "mse_time(generated_vs_target)": 0.017178654670715332,
+    "corr_time(cond4_vs_target)": 0.9942773580551147,
+    "corr_time(generated_vs_target)": 0.9170669913291931,
+    "peak_ratio_time(cond4_vs_target)": 0.9555135922825774,
+    "peak_ratio_time(generated_vs_target)": 0.7607165886200066,
+    "rms_ratio_time(cond4_vs_target)": 0.9949638750420353,
+    "rms_ratio_time(generated_vs_target)": 0.7427405779328853,
+    "mean_ratio_spec_mag(cond4_vs_target)": 1.1018624305725098,
+    "mean_ratio_spec_mag(generated_vs_target)": 0.9372807145118713,
+    "p95_ratio_spec_mag(cond4_vs_target)": 0.9849362969398499,
+    "p95_ratio_spec_mag(generated_vs_target)": 0.9256300926208496,
+    "improvement_pct_spec_mag": -6606.219168620583,
+    "improvement_pct_time": -1716.2250780409827
+  },
+  "stats": {
+    "cond_4bit": {
+      "mean": -0.1061430498957634,
+      "std": 0.2862774729728699,
+      "rms": 0.3052840530872345,
+      "peak": 1.5909301042556763,
+      "spec_energy_total": 9.600381851196289,
+      "spec_energy_band": 40.75716018676758,
+      "spec_p95_mag": 7.928938388824463
+    },
+    "target_11bit": {
+      "mean": -0.1061430498957634,
+      "std": 0.2879251539707184,
+      "rms": 0.3068292737007141,
+      "peak": 1.6649999618530273,
+      "spec_energy_total": 9.707365036010742,
+      "spec_energy_band": 41.380577087402344,
+      "spec_p95_mag": 8.050204277038574
+    },
+    "diffusion_generated": {
+      "mean": -0.10782904922962189,
+      "std": 0.20079848170280457,
+      "rms": 0.22789455950260162,
+      "peak": 1.266593098640442,
+      "spec_energy_total": 7.563206195831299,
+      "spec_energy_band": 32.21955490112305,
+      "spec_p95_mag": 7.451511383056641
+    },
+    "diffusion_generated_11bit": {
+      "mean": -0.10783220082521439,
+      "std": 0.2008008360862732,
+      "rms": 0.22789815068244934,
+      "peak": 1.2659746408462524,
+      "spec_energy_total": 5.730210304260254,
+      "spec_energy_band": 24.407894134521484,
+      "spec_p95_mag": 5.5887346267700195
+    },
+    "diffusion_generated_lp40hz": {
+      "mean": -0.10782904177904129,
+      "std": 0.20046770572662354,
+      "rms": 0.2276032269001007,
+      "peak": 1.26381254196167,
+      "spec_energy_total": 5.7168073654174805,
+      "spec_energy_band": 24.38873291015625,
+      "spec_p95_mag": 5.587955474853516
+    }
+  }
+}

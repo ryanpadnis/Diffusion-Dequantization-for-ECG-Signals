@@ -33,7 +33,12 @@ from data.utils.transforms import get_transform
 from data.utils.quantizers import UniformQuantizer, compute_range_from_tensor
 
 # energy metrics helpers
-from diffusion.utils.metrics import compute_energy_metrics, print_energy_metrics
+from diffusion.utils.metrics import (
+    compute_energy_metrics,
+    compute_spectral_energy_metrics,
+    print_energy_metrics,
+    print_spectral_energy_metrics,
+)
 
 
 def _lowpass_fft(x: torch.Tensor, *, cutoff_hz: float, sample_rate_hz: float) -> torch.Tensor:
@@ -2033,7 +2038,7 @@ def _griffin_lim(
     win_length: int,
     center: bool,
     onesided: bool,
-    length: int,
+    length: int | None = None,
     n_iter: int = 32,
     seed: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -2057,19 +2062,21 @@ def _griffin_lim(
     g.manual_seed(int(seed))
     phase = (2.0 * math.pi) * torch.rand(mag.shape, generator=g, device=device, dtype=torch.float32) - math.pi
 
+    kw: dict = {
+        "n_fft": int(n_fft),
+        "hop_length": int(hop_length),
+        "win_length": int(win_length),
+        "window": window,
+        "center": bool(center),
+        "onesided": bool(onesided),
+    }
+    if length is not None:
+        kw["length"] = int(length)
+
     time = None
     for _ in range(int(max(1, n_iter))):
         complex_spec = mag * torch.exp(1j * phase)
-        time = torch.istft(
-            complex_spec,
-            n_fft=int(n_fft),
-            hop_length=int(hop_length),
-            win_length=int(win_length),
-            window=window,
-            center=bool(center),
-            onesided=bool(onesided),
-            length=int(length),
-        )
+        time = torch.istft(complex_spec, **kw)
         est = torch.stft(
             time,
             n_fft=int(n_fft),
@@ -3228,6 +3235,83 @@ def _serialize_energy_results(results: dict | None) -> dict | None:
     return out
 
 
+def _serialize_spectral_energy_results(results: dict | None) -> dict | None:
+    """Convert compute_spectral_energy_metrics output into JSON-serializable dict."""
+    if not results:
+        return None
+    def _d(m):
+        return m._asdict() if hasattr(m, '_asdict') else {}
+    out: dict = {
+        'threshold': results['threshold'],
+        'gt_band_fracs': results['gt_band_fracs'],
+        '4bit_vs_target': _d(results['4bit_vs_target']),
+        'trajectories': [],
+    }
+    for entry in results.get('trajectories', []):
+        out['trajectories'].append({
+            'trajectory_idx': entry.get('trajectory_idx'),
+            'improvement_vs_4bit_pct': float(entry.get('improvement_vs_4bit_pct', float('nan'))),
+            'metrics': _d(entry.get('metrics')),
+            'vs_4bit': _d(entry.get('vs_4bit')),
+        })
+    return out
+
+
+def _compute_spectral_metrics_if_available(
+    sample_dir: Path,
+    data: dict,
+    config: dict,
+    n_bands: int = 4,
+    threshold: float = 0.10,
+) -> dict | None:
+    """Compute spectral energy metrics when target_spec.pt exists (V8, V9).
+    Uses normalized specs only (target_spec_norm, condition_spec_4bit, spectrogram_norm)
+    so all magnitudes are in the same representation.
+    """
+    target_spec_path = sample_dir / 'target_spec.pt'
+    cond_spec_path = sample_dir / 'condition_spec.pt'
+    if not target_spec_path.exists() or not cond_spec_path.exists():
+        return None
+    try:
+        tgt_obj = torch.load(target_spec_path, map_location='cpu')
+        cond_obj = torch.load(cond_spec_path, map_location='cpu')
+        if not isinstance(tgt_obj, dict) or 'target_spec_norm' not in tgt_obj:
+            return None
+        if not isinstance(cond_obj, dict) or 'condition_spec_4bit' not in cond_obj:
+            return None
+        target_mag = tgt_obj['target_spec_norm'].detach().to(torch.float32)
+        cond4_mag = cond_obj['condition_spec_4bit'].detach().to(torch.float32)
+        target_mag = torch.clamp(target_mag, min=1e-8)
+        cond4_mag = torch.clamp(cond4_mag, min=1e-8)
+    except Exception:
+        return None
+    traj_mags: list[torch.Tensor] = []
+    i = 0
+    while True:
+        traj_path = sample_dir / f'trajectory_{i}.pt'
+        if not traj_path.exists():
+            break
+        try:
+            traj_obj = torch.load(traj_path, map_location='cpu')
+            if isinstance(traj_obj, dict) and torch.is_tensor(traj_obj.get('spectrogram_norm')):
+                gm = traj_obj['spectrogram_norm'].detach().cpu().to(torch.float32)
+                while gm.ndim > 2:
+                    gm = gm.squeeze(0)
+                traj_mags.append(torch.clamp(gm, min=1e-8))
+        except Exception:
+            pass
+        i += 1
+    if not traj_mags:
+        return None
+    return compute_spectral_energy_metrics(
+        target_mag=target_mag,
+        cond4_mag=cond4_mag,
+        traj_mags=traj_mags,
+        n_bands=n_bands,
+        threshold=threshold,
+    )
+
+
 def _tensor_stats(x: torch.Tensor | None) -> dict:
     if x is None:
         return {}
@@ -3516,17 +3600,29 @@ def main() -> None:
         sampler_tag = detected_sampler or data.get('_sampler_type')
         tag = f"_{sampler_tag}" if isinstance(sampler_tag, str) and sampler_tag else ""
 
-        # compute energy-based metrics for this sample (may return None)
+        # compute time-domain energy metrics (requires 16bit_gt; may return None for V8)
         energy_results = compute_energy_metrics(data)
         if energy_results is not None:
-            # save serialized copy for downstream inspection
             try:
                 with open(plot_dir / f'energy_metrics{tag}.json', 'w') as f:
                     json.dump(_serialize_energy_results(energy_results), f, indent=2)
             except Exception:
                 pass
-            print(f"sample_{sample_idx}{tag}: computed energy metrics")
+            print(f"sample_{sample_idx}{tag}: computed energy metrics (time-domain)")
             print_energy_metrics(energy_results)
+
+        # compute spectral energy metrics when target_spec.pt exists (V8, V9)
+        spectral_results = _compute_spectral_metrics_if_available(
+            sample_dir, data, config, n_bands=4, threshold=0.10
+        )
+        if spectral_results is not None:
+            try:
+                with open(plot_dir / f'energy_metrics_spectral{tag}.json', 'w') as f:
+                    json.dump(_serialize_spectral_energy_results(spectral_results), f, indent=2)
+            except Exception:
+                pass
+            print(f"sample_{sample_idx}{tag}: computed spectral energy metrics (target_spec)")
+            print_spectral_energy_metrics(spectral_results)
 
         if bool(args.compare):
             # Compare using sampler-saved artifacts when available to avoid double inversion.
@@ -3988,6 +4084,8 @@ def main() -> None:
             }
             if energy_results is not None:
                 metrics['energy_metrics'] = _serialize_energy_results(energy_results)
+            if spectral_results is not None:
+                metrics['spectral_energy_metrics'] = _serialize_spectral_energy_results(spectral_results)
             with open(plot_dir / f'metrics_minimal{tag}.json', 'w') as f:
                 json.dump(metrics, f, indent=2)
             print(
