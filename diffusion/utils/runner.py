@@ -448,17 +448,40 @@ def process_data_before_training(config:dict):
 
     def _s3_put_torch(obj, s3_uri: str) -> None:
         from diffusion.aws.s3_io import split_s3_uri
+        import io
 
         bucket, key = split_s3_uri(s3_uri)
         if not key:
             raise ValueError(f"S3 URI must include a key: {s3_uri}")
 
         client = _s3_client()
-        # Avoid holding an extra full copy in RAM for large tensors by spooling to tmp.
-        with tempfile.SpooledTemporaryFile(max_size=64 * 1024 * 1024) as f:
-            torch.save(obj, f)
-            f.seek(0)
-            client.upload_fileobj(f, bucket, key)
+        # Serialize to an in-memory buffer first so we know the total size for progress.
+        buf = io.BytesIO()
+        torch.save(obj, buf)
+        total_bytes = buf.tell()
+        buf.seek(0)
+
+        uploaded = [0]
+        last_pct = [-1]
+
+        def _progress(n_bytes: int) -> None:
+            uploaded[0] += n_bytes
+            pct = int(uploaded[0] * 100 / total_bytes) if total_bytes > 0 else 100
+            if pct // 10 > last_pct[0] // 10:
+                last_pct[0] = pct
+                mb_done = uploaded[0] / (1024 ** 2)
+                mb_total = total_bytes / (1024 ** 2)
+                print(f"[s3_upload] {key.split('/')[-1]}: {pct}%  ({mb_done:.1f} / {mb_total:.1f} MB)", flush=True)
+
+        print(f"[s3_upload] Starting upload: {key.split('/')[-1]} ({total_bytes / (1024**2):.1f} MB)", flush=True)
+        # Block SIGINT for the duration of the upload so stray Ctrl+C can't corrupt it.
+        import signal as _sig
+        _old_handler = _sig.signal(_sig.SIGINT, _sig.SIG_IGN)
+        try:
+            client.upload_fileobj(buf, bucket, key, Callback=_progress)
+        finally:
+            _sig.signal(_sig.SIGINT, _old_handler)
+        print(f"[s3_upload] Done: {key.split('/')[-1]}", flush=True)
 
     def _s3_put_bytes(data: bytes, s3_uri: str) -> None:
         from diffusion.aws.s3_io import split_s3_uri
@@ -884,6 +907,8 @@ def process_data_before_training(config:dict):
         print(f"[train_diffuser] Normalizing spectrogram magnitudes using per-sample z-score (mean/std, clamp_sigma={config.get('mag_norm_clamp_sigma', 3.0)})")
     elif mag_norm_mode == 'none':
         print(f"[train_diffuser] Spectrogram magnitude normalization DISABLED (raw values passed to model)")
+    elif mag_norm_mode == 'log1p':
+        print(f"[train_diffuser] Normalizing spectrogram magnitudes using per-sample log1p (log-domain minmax)")
     else:
         print(f"[train_diffuser] Normalizing spectrogram magnitudes using per-sample condition min/max")
 

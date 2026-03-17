@@ -146,6 +146,13 @@ class DiffusionSampler:
             norm = mag / denom
             norm = norm * 2.0 - 1.0
             norm = torch.clamp(norm, -1.0, 1.0)
+        elif mag_norm_mode in {'log1p', 'log_minmax', 'logminmax'}:
+            # log domain minmax: cond_min=log1p_min, cond_denom=log1p_range
+            cmin = cond_min.to(torch.float32)
+            denom = cond_denom.to(torch.float32)
+            mag_log = torch.log1p(torch.clamp(mag, min=0.0))
+            norm = (mag_log - cmin) / denom * 2.0 - 1.0
+            norm = torch.clamp(norm, -1.0, 1.0)
         else:
             cmin = cond_min.to(torch.float32)
             denom = cond_denom.to(torch.float32)
@@ -349,6 +356,10 @@ class DiffusionSampler:
             elif _norm_mode in {'none', 'off', 'identity'}:
                 # identity: denom=1, min=0 → x * 1 + 0 = x
                 denormalized = generated_mag
+            elif _norm_mode in {'log1p', 'log_minmax', 'logminmax'}:
+                # log1p denorm: undo minmax in log domain, then expm1
+                x_log = (generated_mag + 1.0) / 2.0 * cond_denom + cond_min
+                denormalized = torch.expm1(x_log)
             else:
                 # minmax / absmax denorm: (x + 1) / 2 * range + min
                 denormalized = (generated_mag + 1.0) / 2.0
@@ -584,6 +595,9 @@ class DiffusionSampler:
                     _snap_mode = str(self.config.get('mag_norm_mode', 'minmax') or 'minmax').strip().lower()
                     if _snap_mode in {'zscore', 'z_score', 'standardize'}:
                         specs_denorm_mag = specs_mag * cden + cmin
+                    elif _snap_mode in {'log1p', 'log_minmax', 'logminmax'}:
+                        x_log = (specs_mag + 1.0) / 2.0 * cden + cmin
+                        specs_denorm_mag = torch.expm1(x_log)
                     else:
                         specs_denorm_mag = (specs_mag + 1.0) / 2.0
                         specs_denorm_mag = specs_denorm_mag * cden + cmin
@@ -605,6 +619,9 @@ class DiffusionSampler:
                     _snap_mode = str(self.config.get('mag_norm_mode', 'minmax') or 'minmax').strip().lower()
                     if _snap_mode in {'zscore', 'z_score', 'standardize'}:
                         specs_denorm = specs_norm * cden + cmin
+                    elif _snap_mode in {'log1p', 'log_minmax', 'logminmax'}:
+                        x_log = (specs_norm + 1.0) / 2.0 * cden + cmin
+                        specs_denorm = torch.expm1(x_log)
                     else:
                         specs_denorm = (specs_norm + 1.0) / 2.0
                         specs_denorm = specs_denorm * cden + cmin

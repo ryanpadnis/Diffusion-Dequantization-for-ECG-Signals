@@ -1,26 +1,19 @@
-"""V9 sweep: same 12-model grid as V8, but sampling uses front+back (head+tail).
+"""V10 sweep: same 12-model grid as V9, but with log1p magnitude normalization and 1-bit conditioning.
 
 This runs 4 quantizers × 3 schedules = 12 sequential train+sample runs on Anyscale.
 
-Key behavior change vs V8:
-- Training is unchanged.
-- Sampling calls `diffusion.train.ray_sample` with `--select headtail --head 8 --tail 8`
-  (and explicitly sets holdout size to 500 from the end).
+Key behavior changes vs V9:
+- Spectrogram magnitude normalization: mag_norm_mode=log1p (log-domain minmax instead of zscore)
+- Conditioning bit depth: bit_size=1 (binary quantization of the condition signal)
+- Sampling selection is unchanged: headtail (head=8, tail=8, holdout=500)
 
 Usage
 -----
-  uv run python -m diffusion.aws.sweep_v9               # full sweep
-  uv run python -m diffusion.aws.sweep_v9 --dry-run     # print remote script, no execution
-  uv run python -m diffusion.aws.sweep_v9 --no-preprocess  # skip local preprocessing
-  uv run python -m diffusion.aws.sweep_v9 --skip-sample    # train only
-  uv run python -m diffusion.aws.sweep_v9 --only uniform__linear uniform__cosine
-
-Optional (work around broken V10 sweep runner):
-    uv run python -m diffusion.aws.sweep_v9 --v10-overrides
-
-The --v10-overrides switch applies the same config overrides used by V10:
-- mag_norm_mode=log1p (log-domain minmax normalization to [-1,1])
-- bit_size=1 (binary conditioning)
+  uv run python -m diffusion.aws.sweep_v10               # full sweep
+  uv run python -m diffusion.aws.sweep_v10 --dry-run     # print remote script, no execution
+  uv run python -m diffusion.aws.sweep_v10 --no-preprocess  # skip local preprocessing
+  uv run python -m diffusion.aws.sweep_v10 --skip-sample    # train only
+  uv run python -m diffusion.aws.sweep_v10 --only uniform__linear uniform__cosine
 """
 
 from __future__ import annotations
@@ -52,7 +45,7 @@ DEFAULT_WORKSPACE = "EE269-ondemand"
 DEFAULT_REGION = "us-east-1"
 DEFAULT_TORCH_SPEC = "torch==2.10.0"
 DEFAULT_TORCH_INDEX = "https://download.pytorch.org/whl/cu118"
-DEFAULT_VERSION = "V9"
+VERSION = "V10"
 
 QUANTIZERS: List[str] = ["uniform", "lloyd_max", "mu_law", "dithered_uniform"]
 SCHEDULES: List[str] = ["linear", "cosine", "sigmoid"]
@@ -60,26 +53,16 @@ SCHEDULES: List[str] = ["linear", "cosine", "sigmoid"]
 DEFAULT_NUM_SAMPLES = 16
 DEFAULT_NUM_TRAJECTORIES = 1
 
-# Sampling selection: "front+back"
+# Sampling selection: "front+back" (same as V9)
 DEFAULT_SELECT = "headtail"
 DEFAULT_HEAD = 8
 DEFAULT_TAIL = 8
 DEFAULT_HOLDOUT_COUNT = 500
 DEFAULT_HOLDOUT_FROM_END = True
 
-# V10-style overrides (for when sweep_v10.py is broken but we want the same config).
+# V10-specific overrides applied to every model
 V10_MAG_NORM_MODE = "log1p"
 V10_BIT_SIZE = 1
-
-
-def _v10_override_kvs(args: argparse.Namespace) -> list[str]:
-    """Return KEY=VALUE strings to pass via --config-override."""
-    if not getattr(args, "v10_overrides", False):
-        return []
-    return [
-        f"mag_norm_mode={V10_MAG_NORM_MODE}",
-        f"bit_size={V10_BIT_SIZE}",
-    ]
 
 
 def _s3_object_exists(*, s3_uri: str, region: str) -> bool:
@@ -90,7 +73,7 @@ def _s3_object_exists(*, s3_uri: str, region: str) -> bool:
 
     if not s3_uri.startswith("s3://"):
         raise ValueError(f"Expected s3:// URI, got {s3_uri!r}")
-    rest = s3_uri[len("s3://") :]
+    rest = s3_uri[len("s3://"):]
     bucket, _, key = rest.partition("/")
     if not bucket or not key:
         raise ValueError(f"Expected full s3://bucket/key URI, got {s3_uri!r}")
@@ -108,19 +91,18 @@ def _ensure_raw_chunks_in_s3(*, repo_root: Path, args: argparse.Namespace) -> No
     if not raw_path.exists():
         raise FileNotFoundError(f"Missing raw chunks file: {raw_path}")
 
-    # Upload to S3 under the same repo-relative key so ray_sample's search finds it.
     bucket, prefix = _parse_s3_uri(str(args.s3))
     rel_key = str(raw_path.relative_to(repo_root)).replace("\\", "/")
     s3_uri = _join_s3(bucket, prefix, rel_key)
 
     if _s3_object_exists(s3_uri=s3_uri, region=str(args.region)):
-        print(f"[sweep_v9] Raw chunks already in S3: {s3_uri}")
+        print(f"[sweep_v10] Raw chunks already in S3: {s3_uri}")
         return
 
     size_gb = raw_path.stat().st_size / (1024**3)
-    print(f"[sweep_v9] Uploading raw chunks to S3 ({size_gb:.2f} GB) → {s3_uri}")
+    print(f"[sweep_v10] Uploading raw chunks to S3 ({size_gb:.2f} GB) → {s3_uri}")
     _upload_file_to_s3(local_path=raw_path, s3_uri=s3_uri, region=str(args.region))
-    print("[sweep_v9] Raw chunks uploaded.")
+    print("[sweep_v10] Raw chunks uploaded.")
 
 
 def model_name(quantizer: str, schedule: str) -> str:
@@ -135,11 +117,11 @@ def _print_banner(text: str) -> None:
 def _ensure_workspace_running(workspace: str, *, timeout_s: int = 300) -> None:
     """Wake the workspace if sleeping and wait until RUNNING."""
     prefix = _anyscale_cmd_prefix()
-    print(f"[sweep_v9] Starting workspace '{workspace}' (no-op if already running)...")
+    print(f"[sweep_v10] Starting workspace '{workspace}' (no-op if already running)...")
     try:
         subprocess.run([*prefix, "workspace_v2", "start", "--name", workspace], check=True, timeout=60)
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
-        print(f"[sweep_v9] Warning: workspace start: {e} — continuing anyway")
+        print(f"[sweep_v10] Warning: workspace start: {e} — continuing anyway")
 
     deadline = time.time() + timeout_s
     last_status = "unknown"
@@ -154,12 +136,12 @@ def _ensure_workspace_running(workspace: str, *, timeout_s: int = 300) -> None:
             combined = (result.stdout + result.stderr).decode("utf-8", errors="replace").lower()
             last_status = combined.strip()
             if "running" in combined:
-                print("[sweep_v9] Workspace is RUNNING.")
+                print("[sweep_v10] Workspace is RUNNING.")
                 return
         except Exception:
             pass
         last_line = last_status.splitlines()[-1].strip() if last_status else "..."
-        print(f"[sweep_v9] Workspace not ready yet ({last_line!r}) — waiting...")
+        print(f"[sweep_v10] Workspace not ready yet ({last_line!r}) — waiting...")
         time.sleep(15)
 
     raise RuntimeError(
@@ -171,19 +153,18 @@ def _ensure_workspace_running(workspace: str, *, timeout_s: int = 300) -> None:
 def _run_local_preprocess(*, quantizer: str, args: argparse.Namespace) -> None:
     """Run preprocessing locally for one quantizer type and upload data to S3."""
     name = model_name(quantizer, "linear")
-    prep_flag = "--prepare-s3-data" if bool(getattr(args, "force_preprocess", False)) else "--prepare-s3-data-if-missing"
     local_cmd = [
         "python",
         "-m",
         "diffusion.train.ray_train",
         "--no-ray",
-        prep_flag,
+        "--prepare-s3-data",
         "--s3",
         str(args.s3),
         "--s3-region",
         str(args.region),
         "--config-override",
-        f"version={args.version}",
+        f"version={VERSION}",
         "--config-override",
         f"run_name={name}",
         "--config-override",
@@ -192,11 +173,11 @@ def _run_local_preprocess(*, quantizer: str, args: argparse.Namespace) -> None:
         "noise_schedule_type=linear",
         "--config-override",
         "beta_type=linear",
+        "--config-override",
+        f"mag_norm_mode={V10_MAG_NORM_MODE}",
+        "--config-override",
+        f"bit_size={V10_BIT_SIZE}",
     ]
-
-    for kv in _v10_override_kvs(args):
-        local_cmd.extend(["--config-override", kv])
-
     for extra in (args.extra_override or []):
         local_cmd.extend(["--config-override", extra])
     if _have("uv"):
@@ -209,13 +190,13 @@ def _run_local_preprocess(*, quantizer: str, args: argparse.Namespace) -> None:
         _signal.signal(_signal.SIGINT, _signal.SIG_IGN)
 
     global _in_preprocess
-    print(f"[sweep_v9] Preprocessing locally for quantizer={quantizer}...")
+    print(f"[sweep_v10] Preprocessing locally for quantizer={quantizer}...")
     _in_preprocess = True
     try:
         subprocess.run(local_cmd, check=True, preexec_fn=_ignore_sigint)
     finally:
         _in_preprocess = False
-    print(f"[sweep_v9] Preprocessing complete for quantizer={quantizer}.")
+    print(f"[sweep_v10] Preprocessing complete for quantizer={quantizer}.")
 
 
 def _build_remote_script(*, selected: list, args: argparse.Namespace, code_bundle_s3_uri: str) -> str:
@@ -228,14 +209,11 @@ def _build_remote_script(*, selected: list, args: argparse.Namespace, code_bundl
 
     bucket, s3_prefix = _parse_s3_uri(str(args.s3))
 
-    # Optional V10-style overrides applied to every model.
-    v10_kvs = _v10_override_kvs(args)
-
     model_blocks: List[str] = []
     for i, (quantizer, schedule) in enumerate(selected, start=1):
         name = model_name(quantizer, schedule)
-        version_path = f"{args.version}/{name}"
-        results_prefix = "/".join(filter(None, [s3_prefix, "diffusion-results", args.version, name]))
+        version_path = f"{VERSION}/{name}"
+        results_prefix = "/".join(filter(None, [s3_prefix, "diffusion-results", VERSION, name]))
 
         train_flags = [
             "python",
@@ -253,7 +231,7 @@ def _build_remote_script(*, selected: list, args: argparse.Namespace, code_bundl
             "30",
             "--bundle-run",
             "--config-override",
-            f"version={args.version}",
+            f"version={VERSION}",
             "--config-override",
             f"run_name={name}",
             "--config-override",
@@ -262,9 +240,11 @@ def _build_remote_script(*, selected: list, args: argparse.Namespace, code_bundl
             f"noise_schedule_type={schedule}",
             "--config-override",
             f"beta_type={schedule}",
+            "--config-override",
+            f"mag_norm_mode={V10_MAG_NORM_MODE}",
+            "--config-override",
+            f"bit_size={V10_BIT_SIZE}",
         ]
-        for kv in v10_kvs:
-            train_flags.extend(["--config-override", kv])
         if args.epochs is not None:
             train_flags.extend(["--epochs", str(args.epochs)])
         for extra in (args.extra_override or []):
@@ -290,10 +270,10 @@ except Exception:
     print('no')
 " 2>/dev/null)
 set -e
-echo "[sweep_v9] {name}: already_trained=${{{trained_var}}}" """
+echo "[sweep_v10] {name}: already_trained=${{{trained_var}}}" """
 
         if args.skip_sample:
-            sample_section = 'echo "[sweep_v9] Sampling skipped (--skip-sample)."'
+            sample_section = 'echo "[sweep_v10] Sampling skipped (--skip-sample)."'
             check_sampled_block = ""
         else:
             sample_flags = [
@@ -345,14 +325,14 @@ except Exception:
     print('no')
 " 2>/dev/null)
 set -e
-echo "[sweep_v9] {name}: already_sampled=${{{sampled_var}}}" """
+echo "[sweep_v10] {name}: already_sampled=${{{sampled_var}}}" """
 
             sample_section = f"""\
 {check_sampled_block}
 if [ "${{{sampled_var}}}" = "yes" ]; then
-    echo "[sweep_v9] SKIP sampling {name} — samples already in S3"
+    echo "[sweep_v10] SKIP sampling {name} — samples already in S3"
 else
-    echo "[sweep_v9] Resolving run_id for {name}..."
+    echo "[sweep_v10] Resolving run_id for {name}..."
     {run_id_var}=$(python - <<'__PY__'
 import sys
 try:
@@ -376,7 +356,7 @@ except Exception as e:
     print(f'ERROR: {{e}}', file=sys.stderr); sys.exit(1)
 __PY__
 )
-    echo "[sweep_v9] run_id=${{{run_id_var}}}"
+    echo "[sweep_v10] run_id=${{{run_id_var}}}"
     {sample_cmd_str} --run-id "${{{run_id_var}}}"
 fi"""
 
@@ -388,20 +368,18 @@ echo "  [{i}/{total}]  {name}  —  TRAIN{'' if args.skip_sample else '+SAMPLE'}
 echo "========================================================================"
 {check_trained_block}
 if [ "${{{trained_var}}}" = "yes" ]; then
-    echo "[sweep_v9] SKIP training {name} — best_model.pt already in S3"
+    echo "[sweep_v10] SKIP training {name} — best_model.pt already in S3"
 else
-    echo "[sweep_v9] Training {name}..."
+    echo "[sweep_v10] Training {name}..."
     {train_cmd_str}
-    echo "[sweep_v9] Training done: {name}"
+    echo "[sweep_v10] Training done: {name}"
 fi
 {sample_section}
-echo "[sweep_v9] Finished: {name}"
+echo "[sweep_v10] Finished: {name}"
 """
         )
 
     all_model_blocks = "\n".join(model_blocks)
-
-    v10_banner = "" if not v10_kvs else f"  (mag_norm_mode={V10_MAG_NORM_MODE}, bit_size={V10_BIT_SIZE})"
 
     return f"""\
 set -e
@@ -413,7 +391,7 @@ WORKDIR=\"$HOME/ee269_run/current\"
 rm -rf \"$WORKDIR\"
 mkdir -p \"$WORKDIR\"
 export WORKDIR
-echo \"[sweep_v9] WORKDIR=$WORKDIR\"
+echo \"[sweep_v10] WORKDIR=$WORKDIR\"
 
 python -c \"import boto3\" >/dev/null 2>&1 || python -m pip install -q boto3
 
@@ -430,13 +408,13 @@ tar_path = workdir / 'code_bundle.tar.gz'
 boto3.client('s3').download_file(bucket, key, str(tar_path))
 with tarfile.open(tar_path, mode='r:gz') as tf:
     tf.extractall(path=str(workdir))
-print(f\"[sweep_v9] Bundle extracted to {{workdir}}\")
+print(f\"[sweep_v10] Bundle extracted to {{workdir}}\")
 __PY__
 
 cd \"$WORKDIR\"
 python -m pip install -q -e . || true
 
-trap 'echo \"[sweep_v9] Interrupted.\"; exit 130' INT TERM
+trap 'echo \"[sweep_v10] Interrupted.\"; exit 130' INT TERM
 
 python - <<'__PY__'
 import time, ray
@@ -458,38 +436,33 @@ def ensure_deps():
     import torch
     return {{'ok': True, 'torch': torch.__version__, 'cuda': torch.cuda.is_available()}}
 
-print('[sweep_v9] Bootstrapping GPU worker deps...')
+print('[sweep_v10] Bootstrapping GPU worker deps...')
 t = time.time()
 result = ray.get(ensure_deps.remote(), timeout=600)
-print(f'[sweep_v9] Worker ready in {{round(time.time()-t, 1)}}s: {{result}}')
+print(f'[sweep_v10] Worker ready in {{round(time.time()-t, 1)}}s: {{result}}')
 ray.shutdown()
 __PY__
 
-echo \"[sweep_v9] Starting sweep: {total} models{v10_banner}\"
+echo \"[sweep_v10] Starting sweep: {total} models  (mag_norm_mode={V10_MAG_NORM_MODE}, bit_size={V10_BIT_SIZE})\"
 
 {all_model_blocks}
 
 echo \"\"
-echo \"[sweep_v9] ============================================================\"
-echo \"[sweep_v9] ALL {total} MODELS COMPLETE.\"
-echo \"[sweep_v9] ============================================================\"
+echo \"[sweep_v10] ============================================================\"
+echo \"[sweep_v10] ALL {total} MODELS COMPLETE.\"
+echo \"[sweep_v10] ============================================================\"
 echo \"SWEEP_ALL_DONE_SUCCESS\"\n"""
 
 
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="V9 sweep: train+sample all 12 models in ONE cluster session.",
+        description="V10 sweep: train+sample all 12 models with log1p norm and 1-bit conditioning.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
     p.add_argument("--workspace", default=DEFAULT_WORKSPACE)
     p.add_argument("--s3", default=DEFAULT_S3)
     p.add_argument("--region", default=DEFAULT_REGION)
-    p.add_argument(
-        "--version",
-        default=DEFAULT_VERSION,
-        help="Results/version namespace to write under (e.g. V9, V10). This affects S3 prefixes and the config override version=...",
-    )
     p.add_argument("--epochs", type=int, default=None, help="Override num_epochs for every run.")
     p.add_argument("--num-samples", type=int, default=DEFAULT_NUM_SAMPLES)
     p.add_argument("--num-trajectories", type=int, default=DEFAULT_NUM_TRAJECTORIES)
@@ -502,11 +475,6 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--dry-run", action="store_true", help="Print the remote script and exit without submitting.")
     p.add_argument("--no-preprocess", action="store_true", help="Skip local preprocessing (data already in S3).")
     p.add_argument(
-        "--force-preprocess",
-        action="store_true",
-        help="When doing local preprocessing, force regeneration even if the S3 data cache already exists.",
-    )
-    p.add_argument(
         "--only",
         nargs="+",
         default=None,
@@ -514,11 +482,6 @@ def _parse_args() -> argparse.Namespace:
         help="Only include these models (e.g. uniform__linear lloyd_max__cosine).",
     )
     p.add_argument("--skip-sample", action="store_true", help="Train only — no sampling.")
-    p.add_argument(
-        "--v10-overrides",
-        action="store_true",
-        help="Apply V10-style config overrides (mag_norm_mode=log1p, bit_size=1) while running via sweep_v9.",
-    )
     p.add_argument(
         "--extra-override",
         action="append",
@@ -529,20 +492,19 @@ def _parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-_in_preprocess = False
-
-
 _remote_process: Optional[subprocess.Popen] = None
 _interrupt_count = 0
+_in_preprocess = False  # True while a local preprocess upload is in-flight
 
 
 def _signal_handler(signum, frame) -> None:
-    global _interrupt_count, _remote_process
+    global _interrupt_count, _remote_process, _in_preprocess
     _interrupt_count += 1
+    if _in_preprocess:
+        print("\n⚠️  Ctrl+C received during preprocessing upload — ignoring (upload in-flight, please wait).", flush=True)
+        return
     if _interrupt_count == 1:
         print("\n⚠️  Ctrl+C received. Stopping sweep (press again to force quit).")
-        if _in_preprocess:
-            print("[sweep_v9] Note: preprocessing is running; waiting briefly for it to stop...")
         if _remote_process and _remote_process.poll() is None:
             _remote_process.send_signal(signal.SIGINT)
             try:
@@ -567,8 +529,8 @@ def main() -> None:
         valid = {model_name(q, s) for q, s in all_combos}
         unknown = [n for n in args.only if n not in valid]
         if unknown:
-            print(f"[sweep_v9] ERROR: unknown model(s): {unknown}")
-            print(f"[sweep_v9] Valid: {sorted(valid)}")
+            print(f"[sweep_v10] ERROR: unknown model(s): {unknown}")
+            print(f"[sweep_v10] Valid: {sorted(valid)}")
             sys.exit(1)
         selected = [(q, s) for q, s in all_combos if model_name(q, s) in args.only]
     else:
@@ -577,14 +539,9 @@ def main() -> None:
     total = len(selected)
     unique_quantizers = list(dict.fromkeys(q for q, _ in selected))
 
-    v10_note = "" if not args.v10_overrides else f"  |  mag_norm={V10_MAG_NORM_MODE}  |  bit_size={V10_BIT_SIZE}"
-    _print_banner(
-        f"V9 Sweep  |  {total} models  |  version={args.version}  |  1 cluster session{v10_note}  |  workspace={args.workspace}"
-    )
+    _print_banner(f"V10 Sweep  |  {total} models  |  mag_norm={V10_MAG_NORM_MODE}  |  bit_size={V10_BIT_SIZE}  |  workspace={args.workspace}")
     print(f"  Models     : {[model_name(q, s) for q, s in selected]}")
     print(f"  S3 base    : {args.s3}")
-    if args.v10_overrides:
-        print(f"  Overrides  : mag_norm_mode={V10_MAG_NORM_MODE}, bit_size={V10_BIT_SIZE}")
     if args.skip_sample:
         print("  Sampling   : disabled")
     else:
@@ -593,10 +550,10 @@ def main() -> None:
             f"(select={DEFAULT_SELECT}, head={DEFAULT_HEAD}, tail={DEFAULT_TAIL}, holdout={DEFAULT_HOLDOUT_COUNT})"
         )
     print(
-        f"  Preprocess : {'disabled (--no-preprocess)' if args.no_preprocess else f'{len(unique_quantizers)} quantizer type(s) locally (if-missing)'}"
+        f"  Preprocess : {'disabled (--no-preprocess)' if args.no_preprocess else f'{len(unique_quantizers)} quantizer type(s) locally'}"
     )
-    if (not args.no_preprocess) and bool(getattr(args, "force_preprocess", False)):
-        print("  Preprocess : FORCE enabled (--force-preprocess)")
+    print(f"  mag_norm_mode : {V10_MAG_NORM_MODE}")
+    print(f"  bit_size      : {V10_BIT_SIZE}")
     if args.dry_run:
         print("\n  *** DRY RUN — will print remote script only ***")
     print()
@@ -616,7 +573,7 @@ def main() -> None:
         _print_banner("Step 1 / 4  —  Local preprocessing")
         for quantizer in unique_quantizers:
             _run_local_preprocess(quantizer=quantizer, args=args)
-        print("[sweep_v9] All preprocessing complete.")
+        print("[sweep_v10] All preprocessing complete.")
 
     # ---- Step 2: Ensure raw time-domain chunks exist in S3 for sampling ----
     _print_banner("Step 2 / 4  —  Ensuring raw chunks in S3")
@@ -628,9 +585,9 @@ def main() -> None:
     bucket, prefix = _parse_s3_uri(str(args.s3))
     bundle_key_prefix = f"{prefix}/code_bundles" if prefix else "code_bundles"
     code_bundle_s3_uri = _join_s3(bucket, bundle_key_prefix, bundle_path.name)
-    print(f"[sweep_v9] Uploading code bundle → {code_bundle_s3_uri}")
+    print(f"[sweep_v10] Uploading code bundle → {code_bundle_s3_uri}")
     _upload_file_to_s3(local_path=bundle_path, s3_uri=code_bundle_s3_uri, region=str(args.region))
-    print("[sweep_v9] Code bundle uploaded.")
+    print("[sweep_v10] Code bundle uploaded.")
 
     # ---- Step 4: Submit to cluster ----
     _print_banner("Step 4 / 4  —  Submitting to cluster")
@@ -645,7 +602,7 @@ def main() -> None:
     env.setdefault("AWS_DEFAULT_REGION", str(args.region))
     env.setdefault("AWS_REGION", str(args.region))
 
-    print(f"\n[sweep_v9] Submitting {total}-model sweep as a single remote session...")
+    print(f"\n[sweep_v10] Submitting {total}-model sweep as a single remote session...")
     print("💡 Tip: Press Ctrl+C to interrupt.\n")
     print("💡 Note: anyscale run_command may exit 0 on remote failure — we check for")
     print("         a SWEEP_ALL_DONE_SUCCESS sentinel in the output stream.\n")
@@ -654,7 +611,7 @@ def main() -> None:
     last_output: str = ""
     for attempt in range(1, max_attempts + 1):
         if attempt > 1:
-            print(f"[sweep_v9] Retrying submission (attempt {attempt}/{max_attempts})...")
+            print(f"[sweep_v10] Retrying submission (attempt {attempt}/{max_attempts})...")
             _ensure_workspace_running(args.workspace)
 
         t_start = time.time()
@@ -668,7 +625,6 @@ def main() -> None:
                 print(line, end="", flush=True)
                 if "SWEEP_ALL_DONE_SUCCESS" in line:
                     sentinel_seen = True
-                # Keep a bounded tail of output for retry decision.
                 out_lines.append(line)
                 if len(out_lines) > 200:
                     out_lines = out_lines[-200:]
@@ -682,22 +638,21 @@ def main() -> None:
 
         if rc == 0 and sentinel_seen:
             _print_banner(f"Sweep complete  |  total time: {elapsed:.1f} min")
-            print("[sweep_v9] All models completed successfully!")
+            print("[sweep_v10] All models completed successfully!")
             return
 
-        # Special-case: Anyscale occasionally errors if workspace is not fully RUNNING.
         if (
             attempt < max_attempts
             and ("Workspace must be running" in last_output or "WorkspaceState.RUNNING" in last_output)
         ):
-            print("[sweep_v9] Workspace not ready for run_command yet — waiting 30s then retrying...")
+            print("[sweep_v10] Workspace not ready for run_command yet — waiting 30s then retrying...")
             time.sleep(30)
             continue
 
         reason = f"rc={rc}" if rc != 0 else "sentinel not found (remote script exited early)"
         _print_banner(f"Sweep FAILED  |  {reason}  |  elapsed: {elapsed:.1f} min")
-        print(f"[sweep_v9] Remote script did not complete successfully ({reason}).")
-        print("[sweep_v9] Check the output above for the model that failed.")
+        print(f"[sweep_v10] Remote script did not complete successfully ({reason}).")
+        print("[sweep_v10] Check the output above for the model that failed.")
         sys.exit(rc if rc != 0 else 1)
 
 

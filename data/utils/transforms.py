@@ -505,6 +505,8 @@ class SpectrogramMagNormalizer:
             mode = 'absmax'
         elif mode in {'none', 'off', 'identity'}:
             mode = 'none'
+        elif mode in {'log1p', 'log_minmax', 'logminmax'}:
+            mode = 'log1p'
         else:
             mode = 'minmax'
         self.mode = mode
@@ -568,6 +570,22 @@ class SpectrogramMagNormalizer:
             cond_norm = cond
             real_norm = real
 
+        elif self.mode == 'log1p':
+            # Apply log1p compression, then minmax-normalize in the log domain.
+            cond_log = torch.log1p(torch.clamp(cond, min=0.0))
+            cond_log_min = cond_log.amin(dim=spatial_dims, keepdim=True)
+            cond_log_max = cond_log.amax(dim=spatial_dims, keepdim=True)
+            denom = cond_log_max - cond_log_min
+            denom = torch.where(denom.abs() < self.epsilon, torch.ones_like(denom), denom)
+            cond_min = cond_log_min  # stored for denorm
+
+            cond_norm = torch.clamp((cond_log - cond_log_min) / denom * 2.0 - 1.0, -1.0, 1.0)
+            if real is not None:
+                real_log = torch.log1p(torch.clamp(real, min=0.0))
+                real_norm = torch.clamp((real_log - cond_log_min) / denom * 2.0 - 1.0, -1.0, 1.0)
+            else:
+                real_norm = None
+
         else:  # minmax
             cond_min = cond.amin(dim=spatial_dims, keepdim=True)
             cond_max = cond.amax(dim=spatial_dims, keepdim=True)
@@ -603,6 +621,10 @@ class SpectrogramMagNormalizer:
             out = x * denom + cond_min
         elif mode == 'none':
             out = x
+        elif mode == 'log1p':
+            # Undo minmax in log domain, then invert log1p via expm1.
+            x_log = (x + 1.0) / 2.0 * denom + cond_min
+            out = torch.expm1(x_log)
         else:  # minmax / absmax both use (x+1)/2 * denom + min
             out = (x + 1.0) / 2.0 * denom + cond_min
 
